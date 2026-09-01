@@ -1,0 +1,57 @@
+name: Resolve definitive Cargo lockfile
+
+on:
+  push:
+    paths:
+      - '.github/workflows/resolve-lockfile.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  EXPECTED_ZIP_SHA256: 59e7c1599c6438d2372c022ad4a18c272b7cc6cc27f016944c6b0626e0a1a761
+  PROJECT_DIR: _incoming/GDScript_Lab_Tauri_v1.0.0
+
+jobs:
+  lockfile:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.98.0'
+      - name: Verify and unpack frozen production ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP="$(find . -maxdepth 1 -type f -name 'GDScript_Lab_v1.0.0_Tauri_Production_Project_FINAL*.zip' -print -quit)"
+          test -n "$ZIP"
+          ACTUAL="$(sha256sum "$ZIP" | awk '{print $1}')"
+          test "$ACTUAL" = "$EXPECTED_ZIP_SHA256"
+          rm -rf _incoming && mkdir -p _incoming
+          python -m zipfile -e "$ZIP" _incoming
+      - name: Apply proven permanent dependency pins
+        working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('src-tauri/Cargo.toml')
+          s=p.read_text(encoding='utf-8')
+          s=s.replace('tauri-build = { version = "=2.5.6" }','tauri-build = { version = "=2.6.3" }')
+          s=s.replace('tauri-plugin-fs = { version = "=2.5.1" }','tauri-plugin-fs = { version = "=2.5.2" }')
+          p.write_text(s,encoding='utf-8')
+          PY
+      - name: Resolve Cargo.lock
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: cargo generate-lockfile --manifest-path src-tauri/Cargo.toml
+      - name: Upload Cargo.lock
+        uses: actions/upload-artifact@v4
+        with:
+          name: GDScript-Lab-v1.0.0-Cargo-lock
+          if-no-files-found: error
+          path: ${{ env.PROJECT_DIR }}/src-tauri/Cargo.lock
