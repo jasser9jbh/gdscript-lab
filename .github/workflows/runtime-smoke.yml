@@ -1,0 +1,142 @@
+name: Native runtime smoke tests
+
+on:
+  push:
+    paths:
+      - '.github/workflows/runtime-smoke.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  EXPECTED_ZIP_SHA256: 59e7c1599c6438d2372c022ad4a18c272b7cc6cc27f016944c6b0626e0a1a761
+  PROJECT_DIR: _incoming/GDScript_Lab_Tauri_v1.0.0
+  NODE_VERSION: '22.16.0'
+  PYTHON_VERSION: '3.13'
+  RUST_VERSION: '1.98.0'
+
+jobs:
+  windows-launch:
+    name: Windows executable launch smoke
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+      - name: Verify, extract, install and patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP="$(find . -maxdepth 1 -type f -name 'GDScript_Lab_v1.0.0_Tauri_Production_Project_FINAL*.zip' -print -quit)"
+          test -n "$ZIP"
+          ACTUAL="$(sha256sum "$ZIP" | awk '{print $1}')"
+          test "$ACTUAL" = "$EXPECTED_ZIP_SHA256"
+          rm -rf _incoming && mkdir -p _incoming
+          python -m zipfile -e "$ZIP" _incoming
+          cd "$PROJECT_DIR"
+          npm install
+          npm run icons
+          python scripts/audit.py
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('src-tauri/Cargo.toml'); s=p.read_text()
+          s=s.replace('tauri-build = { version = "=2.5.6" }','tauri-build = { version = "=2.6.3" }')
+          s=s.replace('tauri-plugin-fs = { version = "=2.5.1" }','tauri-plugin-fs = { version = "=2.5.2" }')
+          p.write_text(s)
+          PY
+      - name: Build Windows executable
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: npm run tauri -- build --bundles nsis
+      - name: Launch executable and require it to stay alive
+        working-directory: ${{ env.PROJECT_DIR }}
+        shell: pwsh
+        run: |
+          $exe = Join-Path $PWD 'src-tauri\target\release\gdscript-lab.exe'
+          if (-not (Test-Path $exe)) { throw "Native executable missing: $exe" }
+          $p = Start-Process -FilePath $exe -PassThru
+          Start-Sleep -Seconds 8
+          $p.Refresh()
+          if ($p.HasExited) { throw "GDScript Lab exited during the Windows launch smoke test with code $($p.ExitCode)" }
+          Write-Host "PASS: GDScript Lab remained alive for 8 seconds; PID=$($p.Id)"
+          Stop-Process -Id $p.Id -Force
+
+  android-launch:
+    name: Android emulator launch smoke
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - name: Install Android compile toolchain
+        run: |
+          sdkmanager 'platforms;android-36' 'build-tools;36.0.0' 'ndk;27.2.12479018'
+          echo "NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+      - name: Verify, extract, install and patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP="$(find . -maxdepth 1 -type f -name 'GDScript_Lab_v1.0.0_Tauri_Production_Project_FINAL*.zip' -print -quit)"
+          test -n "$ZIP"
+          ACTUAL="$(sha256sum "$ZIP" | awk '{print $1}')"
+          test "$ACTUAL" = "$EXPECTED_ZIP_SHA256"
+          rm -rf _incoming && mkdir -p _incoming
+          python -m zipfile -e "$ZIP" _incoming
+          cd "$PROJECT_DIR"
+          npm install
+          npm run icons
+          python scripts/audit.py
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('src-tauri/Cargo.toml'); s=p.read_text()
+          s=s.replace('tauri-build = { version = "=2.5.6" }','tauri-build = { version = "=2.6.3" }')
+          s=s.replace('tauri-plugin-fs = { version = "=2.5.1" }','tauri-plugin-fs = { version = "=2.5.2" }')
+          p.write_text(s)
+          PY
+          npm run android:init
+      - name: Build debug APK for emulator smoke test
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: npm run tauri -- android build --debug --apk --ci
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm || true
+      - name: Install and launch on Android emulator
+        uses: ReactiveCircus/android-emulator-runner@v2.38.0
+        with:
+          api-level: 35
+          arch: x86_64
+          target: google_apis
+          disable-animations: true
+          script: |
+            set -euo pipefail
+            APK="$(find '${{ env.PROJECT_DIR }}/src-tauri/gen/android/app/build/outputs' -type f -name '*debug*.apk' -print -quit)"
+            test -n "$APK"
+            adb install -r "$APK"
+            adb shell monkey -p com.jbhprods.gdscriptlab -c android.intent.category.LAUNCHER 1
+            sleep 8
+            PID="$(adb shell pidof com.jbhprods.gdscriptlab | tr -d '\r')"
+            test -n "$PID"
+            echo "PASS: Android GDScript Lab process is alive; PID=$PID"
+            adb shell dumpsys package com.jbhprods.gdscriptlab | grep -E 'versionName=|versionCode=' | head
