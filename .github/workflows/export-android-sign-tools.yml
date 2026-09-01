@@ -20,7 +20,7 @@ jobs:
       - uses: android-actions/setup-android@v3
       - name: Install Android build tools 36.0.0
         run: sdkmanager 'build-tools;36.0.0'
-      - name: Stage apksigner and zipalign
+      - name: Stage signing and metadata tools
         shell: bash
         run: |
           set -euo pipefail
@@ -28,9 +28,11 @@ jobs:
           mkdir -p exported/lib exported/lib64
           cp "$BT/apksigner" exported/
           cp "$BT/zipalign" exported/
+          cp "$BT/aapt" exported/
+          cp "$BT/aapt2" exported/
           cp "$BT/lib/apksigner.jar" exported/lib/
           cp "$BT/lib64/libc++.so" exported/lib64/
-          chmod +x exported/apksigner exported/zipalign
+          chmod +x exported/apksigner exported/zipalign exported/aapt exported/aapt2
       - uses: actions/upload-artifact@v4
         with:
           name: android-build-tools-signing-36.0.0-linux
