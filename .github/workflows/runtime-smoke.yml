@@ -89,10 +89,18 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-      - uses: android-actions/setup-android@v3
-      - name: Install Android compile toolchain
+      - uses: android-actions/setup-android@v4
+      - name: Pin modern Android SDK command-line tools
+        shell: bash
         run: |
-          sdkmanager 'platforms;android-36' 'build-tools;36.0.0' 'ndk;27.2.12479018'
+          set -euo pipefail
+          MODERN_SDK_BIN="$ANDROID_HOME/cmdline-tools/latest/bin"
+          test -x "$MODERN_SDK_BIN/sdkmanager"
+          echo "$MODERN_SDK_BIN" >> "$GITHUB_PATH"
+          export PATH="$MODERN_SDK_BIN:$PATH"
+          echo "sdkmanager=$(command -v sdkmanager)"
+          sdkmanager --version
+          sdkmanager 'platform-tools' 'emulator' 'platforms;android-36' 'build-tools;36.0.0' 'ndk;27.2.12479018' 'system-images;android-35;google_apis;x86_64'
           echo "NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@master
         with:
@@ -143,9 +151,18 @@ jobs:
             APK="$(find '${{ env.PROJECT_DIR }}/src-tauri/gen/android/app/build/outputs' -type f -name '*debug*.apk' -print -quit)"
             test -n "$APK"
             adb install -r "$APK"
+            adb logcat -c
+            adb shell am force-stop com.jbhprods.gdscriptlab || true
             adb shell monkey -p com.jbhprods.gdscriptlab -c android.intent.category.LAUNCHER 1
-            sleep 8
+            sleep 10
             PID="$(adb shell pidof com.jbhprods.gdscriptlab | tr -d '\r')"
             test -n "$PID"
             echo "PASS: Android GDScript Lab process is alive; PID=$PID"
             adb shell dumpsys package com.jbhprods.gdscriptlab | grep -E 'versionName=|versionCode=' | head
+            adb logcat -d > /tmp/gdlab-logcat.txt
+            if grep -Eq 'FATAL EXCEPTION|Process: com\.jbhprods\.gdscriptlab.*has died' /tmp/gdlab-logcat.txt; then
+              echo 'Detected Android runtime crash markers:'
+              grep -E 'FATAL EXCEPTION|Process: com\.jbhprods\.gdscriptlab.*has died' /tmp/gdlab-logcat.txt | tail -30
+              exit 1
+            fi
+            echo 'PASS: no fatal Android runtime crash marker found after launch.'
