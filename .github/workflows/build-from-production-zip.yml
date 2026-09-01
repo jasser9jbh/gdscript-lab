@@ -4,6 +4,7 @@ on:
   push:
     paths:
       - '*.zip'
+      - '.github/workflows/build-from-production-zip.yml'
   workflow_dispatch:
 
 permissions:
@@ -104,9 +105,6 @@ jobs:
         with:
           toolchain: ${{ env.RUST_VERSION }}
           targets: ${{ matrix.target || '' }}
-      - uses: swatinem/rust-cache@v2
-        with:
-          workspaces: './_incoming/GDScript_Lab_Tauri_v1.0.0/src-tauri -> target'
       - name: Verify and unpack production ZIP
         shell: bash
         run: |
@@ -126,6 +124,24 @@ jobs:
       - name: Audit frozen source
         working-directory: ${{ env.PROJECT_DIR }}
         run: python scripts/audit.py
+      - name: Patch compatible Tauri build dependency in ephemeral workspace
+        working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('src-tauri/Cargo.toml')
+          s = p.read_text(encoding='utf-8')
+          old = 'tauri-build = "=2.5.6"'
+          new = 'tauri-build = "=2.6.3"'
+          if old not in s:
+              raise SystemExit('Expected tauri-build 2.5.6 pin not found')
+          p.write_text(s.replace(old, new, 1), encoding='utf-8')
+          print('Patched tauri-build 2.5.6 -> 2.6.3 in temporary build workspace')
+          PY
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './_incoming/GDScript_Lab_Tauri_v1.0.0/src-tauri -> target'
       - name: Build native desktop bundle
         working-directory: ${{ env.PROJECT_DIR }}
         shell: bash
@@ -180,9 +196,6 @@ jobs:
         with:
           toolchain: ${{ env.RUST_VERSION }}
           targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
-      - uses: swatinem/rust-cache@v2
-        with:
-          workspaces: './_incoming/GDScript_Lab_Tauri_v1.0.0/src-tauri -> target'
       - name: Verify and unpack production ZIP
         shell: bash
         run: |
@@ -199,6 +212,24 @@ jobs:
           npm install
           npm run icons
           python scripts/audit.py
+      - name: Patch compatible Tauri build dependency in ephemeral workspace
+        working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('src-tauri/Cargo.toml')
+          s = p.read_text(encoding='utf-8')
+          old = 'tauri-build = "=2.5.6"'
+          new = 'tauri-build = "=2.6.3"'
+          if old not in s:
+              raise SystemExit('Expected tauri-build 2.5.6 pin not found')
+          p.write_text(s.replace(old, new, 1), encoding='utf-8')
+          print('Patched tauri-build 2.5.6 -> 2.6.3 in temporary build workspace')
+          PY
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './_incoming/GDScript_Lab_Tauri_v1.0.0/src-tauri -> target'
       - name: Initialize Android project
         working-directory: ${{ env.PROJECT_DIR }}
         run: npm run android:init
@@ -264,6 +295,21 @@ jobs:
           npm install
           npm run icons
           python scripts/audit.py
+      - name: Patch compatible Tauri build dependency in ephemeral workspace
+        working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('src-tauri/Cargo.toml')
+          s = p.read_text(encoding='utf-8')
+          old = 'tauri-build = "=2.5.6"'
+          new = 'tauri-build = "=2.6.3"'
+          if old not in s:
+              raise SystemExit('Expected tauri-build 2.5.6 pin not found')
+          p.write_text(s.replace(old, new, 1), encoding='utf-8')
+          print('Patched tauri-build 2.5.6 -> 2.6.3 in temporary build workspace')
+          PY
       - name: Initialize and compile iOS without signing
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
