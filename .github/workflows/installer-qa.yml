@@ -1,0 +1,177 @@
+# Final v1.0.0 installer QA
+name: Installer-level smoke tests
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/installer-qa.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  EXPECTED_ZIP_SHA256: 59e7c1599c6438d2372c022ad4a18c272b7cc6cc27f016944c6b0626e0a1a761
+  PROJECT_DIR: _incoming/GDScript_Lab_Tauri_v1.0.0
+  NODE_VERSION: '22.16.0'
+  PYTHON_VERSION: '3.13'
+  RUST_VERSION: '1.98.0'
+
+jobs:
+  windows-installers:
+    name: Windows MSI + NSIS install/launch/uninstall
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+      - name: Verify and prepare source
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP="$(find . -maxdepth 1 -type f -name 'GDScript_Lab_v1.0.0_Tauri_Production_Project_FINAL*.zip' -print -quit)"
+          test -n "$ZIP"
+          ACTUAL="$(sha256sum "$ZIP" | awk '{print $1}')"
+          test "$ACTUAL" = "$EXPECTED_ZIP_SHA256"
+          rm -rf _incoming && mkdir -p _incoming
+          python -m zipfile -e "$ZIP" _incoming
+          cd "$PROJECT_DIR"
+          npm install
+          npm run icons
+          python scripts/audit.py
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('src-tauri/Cargo.toml'); s=p.read_text()
+          s=s.replace('tauri-build = { version = "=2.5.6" }','tauri-build = { version = "=2.6.3" }')
+          s=s.replace('tauri-plugin-fs = { version = "=2.5.1" }','tauri-plugin-fs = { version = "=2.5.2" }')
+          p.write_text(s)
+          PY
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './_incoming/GDScript_Lab_Tauri_v1.0.0/src-tauri -> target'
+      - name: Build MSI and NSIS
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: npm run tauri -- build --bundles msi,nsis
+      - name: Install, launch and uninstall MSI
+        working-directory: ${{ env.PROJECT_DIR }}
+        shell: pwsh
+        run: |
+          $msi = Get-ChildItem -Recurse 'src-tauri\target\release\bundle\msi\*.msi' | Select-Object -First 1
+          if (-not $msi) { throw 'MSI not found' }
+          $proc = Start-Process msiexec.exe -ArgumentList @('/i', $msi.FullName, '/qn', '/norestart') -Wait -PassThru
+          if ($proc.ExitCode -ne 0) { throw "MSI install failed: $($proc.ExitCode)" }
+          $roots = @($env:LOCALAPPDATA, $env:ProgramFiles, ${env:ProgramFiles(x86)}) | Where-Object { $_ }
+          $exe = $null
+          foreach ($root in $roots) {
+            $exe = Get-ChildItem -Path $root -Filter 'gdscript-lab.exe' -File -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($exe) { break }
+          }
+          if (-not $exe) { throw 'Installed GDScript Lab executable not found after MSI install' }
+          $app = Start-Process $exe.FullName -PassThru
+          Start-Sleep -Seconds 8
+          $app.Refresh()
+          if ($app.HasExited) { throw "MSI-installed app exited early: $($app.ExitCode)" }
+          Stop-Process -Id $app.Id -Force
+          Write-Host "PASS: MSI install + launch; $($exe.FullName)"
+          $un = Start-Process msiexec.exe -ArgumentList @('/x', $msi.FullName, '/qn', '/norestart') -Wait -PassThru
+          if ($un.ExitCode -ne 0) { throw "MSI uninstall failed: $($un.ExitCode)" }
+      - name: Install, launch and uninstall NSIS
+        working-directory: ${{ env.PROJECT_DIR }}
+        shell: pwsh
+        run: |
+          $setup = Get-ChildItem -Recurse 'src-tauri\target\release\bundle\nsis\*.exe' | Select-Object -First 1
+          if (-not $setup) { throw 'NSIS setup not found' }
+          $proc = Start-Process $setup.FullName -ArgumentList '/S' -Wait -PassThru
+          if ($proc.ExitCode -ne 0) { throw "NSIS install failed: $($proc.ExitCode)" }
+          $roots = @($env:LOCALAPPDATA, $env:ProgramFiles, ${env:ProgramFiles(x86)}) | Where-Object { $_ }
+          $exe = $null
+          foreach ($root in $roots) {
+            $exe = Get-ChildItem -Path $root -Filter 'gdscript-lab.exe' -File -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($exe) { break }
+          }
+          if (-not $exe) { throw 'Installed GDScript Lab executable not found after NSIS install' }
+          $app = Start-Process $exe.FullName -PassThru
+          Start-Sleep -Seconds 8
+          $app.Refresh()
+          if ($app.HasExited) { throw "NSIS-installed app exited early: $($app.ExitCode)" }
+          Stop-Process -Id $app.Id -Force
+          Write-Host "PASS: NSIS install + launch; $($exe.FullName)"
+          $uninstaller = Get-ChildItem -Path $exe.Directory.FullName -Filter 'uninstall*.exe' -File -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($uninstaller) {
+            $un = Start-Process $uninstaller.FullName -ArgumentList '/S' -Wait -PassThru
+            if ($un.ExitCode -ne 0) { throw "NSIS uninstall failed: $($un.ExitCode)" }
+          } else {
+            throw 'NSIS uninstaller not found'
+          }
+
+  linux-deb:
+    name: Linux DEB install/launch/remove
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install Linux prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf xdg-utils xvfb
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+      - name: Verify and prepare source
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP="$(find . -maxdepth 1 -type f -name 'GDScript_Lab_v1.0.0_Tauri_Production_Project_FINAL*.zip' -print -quit)"
+          test -n "$ZIP"
+          ACTUAL="$(sha256sum "$ZIP" | awk '{print $1}')"
+          test "$ACTUAL" = "$EXPECTED_ZIP_SHA256"
+          rm -rf _incoming && mkdir -p _incoming
+          python -m zipfile -e "$ZIP" _incoming
+          cd "$PROJECT_DIR"
+          npm install
+          npm run icons
+          python scripts/audit.py
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('src-tauri/Cargo.toml'); s=p.read_text()
+          s=s.replace('tauri-build = { version = "=2.5.6" }','tauri-build = { version = "=2.6.3" }')
+          s=s.replace('tauri-plugin-fs = { version = "=2.5.1" }','tauri-plugin-fs = { version = "=2.5.2" }')
+          p.write_text(s)
+          PY
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './_incoming/GDScript_Lab_Tauri_v1.0.0/src-tauri -> target'
+      - name: Build DEB
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: npm run tauri -- build --bundles deb
+      - name: Install, GUI-launch and remove DEB
+        working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          DEB="$(find src-tauri/target/release/bundle/deb -type f -name '*.deb' -print -quit)"
+          test -n "$DEB"
+          PKG="$(dpkg-deb -f "$DEB" Package)"
+          sudo dpkg -i "$DEB"
+          BIN="$(dpkg -L "$PKG" | awk '/\/bin\// {print; exit}')"
+          test -n "$BIN" -a -x "$BIN"
+          xvfb-run -a "$BIN" >/tmp/gdlab-deb.log 2>&1 &
+          PID=$!
+          sleep 8
+          kill -0 "$PID"
+          echo "PASS: DEB install + GUI launch; PID=$PID binary=$BIN"
+          kill "$PID" || true
+          wait "$PID" || true
+          sudo dpkg -r "$PKG"
