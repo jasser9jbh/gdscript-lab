@@ -1,0 +1,33 @@
+name: Export Android signing tools
+
+on:
+  push:
+    paths:
+      - '.github/workflows/export-android-sign-tools.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: android-actions/setup-android@v3
+      - name: Install Android build tools 36.0.0
+        run: sdkmanager 'build-tools;36.0.0'
+      - name: Stage apksigner and zipalign
+        shell: bash
+        run: |
+          set -euo pipefail
+          BT="$ANDROID_HOME/build-tools/36.0.0"
+          mkdir -p exported/lib
+          cp "$BT/apksigner" exported/
+          cp "$BT/zipalign" exported/
+          cp "$BT/lib/apksigner.jar" exported/lib/
+          chmod +x exported/apksigner exported/zipalign
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-build-tools-signing-36.0.0-linux
+          if-no-files-found: error
+          path: exported
