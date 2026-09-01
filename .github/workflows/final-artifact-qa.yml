@@ -119,7 +119,7 @@ jobs:
           echo "PASS: DEB-installed app stayed alive; PID=$APP_PID"
           kill "$APP_PID" || true
       - name: Remove DEB package
-        run: sudo apt-get remove -y gdscript-lab
+        run: sudo apt-get remove -y gd-script-lab
 
   android-release-runtime:
     name: Exact Android release payload emulator launch
