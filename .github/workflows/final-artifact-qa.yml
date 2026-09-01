@@ -1,0 +1,179 @@
+name: Final exact-artifact production QA
+
+on:
+  push:
+    paths:
+      - '.github/workflows/final-artifact-qa.yml'
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+env:
+  FINAL_BUILD_RUN_ID: '33553834065'
+
+jobs:
+  windows-installers:
+    name: Exact Windows MSI + NSIS install/launch/uninstall
+    runs-on: windows-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: GDScript-Lab-v1.0.0-FINAL-Windows-x64
+          path: artifact
+          repository: ${{ github.repository }}
+          run-id: ${{ env.FINAL_BUILD_RUN_ID }}
+          github-token: ${{ github.token }}
+      - name: Verify exact installer payloads exist
+        shell: pwsh
+        run: |
+          $msi = Get-ChildItem artifact -Recurse -Filter '*.msi' | Select-Object -First 1
+          $nsis = Get-ChildItem artifact -Recurse -Filter '*setup.exe' | Select-Object -First 1
+          if (-not $msi) { throw 'MSI not found in final artifact' }
+          if (-not $nsis) { throw 'NSIS installer not found in final artifact' }
+          Write-Host "MSI: $($msi.FullName)"
+          Write-Host "NSIS: $($nsis.FullName)"
+      - name: Install, launch, and uninstall exact MSI
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $msi = (Get-ChildItem artifact -Recurse -Filter '*.msi' | Select-Object -First 1).FullName
+          $p = Start-Process msiexec.exe -ArgumentList @('/i', "`"$msi`"", '/qn', '/norestart') -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "MSI install failed: $($p.ExitCode)" }
+          $candidates = @(
+            "$env:ProgramFiles\GDScript Lab\gdscript-lab.exe",
+            "$env:LOCALAPPDATA\GDScript Lab\gdscript-lab.exe"
+          )
+          $exe = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $exe) { throw 'Installed MSI executable not found' }
+          $app = Start-Process -FilePath $exe -PassThru
+          Start-Sleep -Seconds 8
+          $app.Refresh()
+          if ($app.HasExited) { throw "MSI-installed app exited early: $($app.ExitCode)" }
+          Write-Host "PASS: MSI-installed app stayed alive; PID=$($app.Id)"
+          Stop-Process -Id $app.Id -Force
+          $u = Start-Process msiexec.exe -ArgumentList @('/x', "`"$msi`"", '/qn', '/norestart') -Wait -PassThru
+          if ($u.ExitCode -ne 0) { throw "MSI uninstall failed: $($u.ExitCode)" }
+      - name: Install, launch, and uninstall exact NSIS
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $nsis = (Get-ChildItem artifact -Recurse -Filter '*setup.exe' | Select-Object -First 1).FullName
+          $p = Start-Process -FilePath $nsis -ArgumentList '/S' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "NSIS install failed: $($p.ExitCode)" }
+          $candidates = @(
+            "$env:LOCALAPPDATA\GDScript Lab\gdscript-lab.exe",
+            "$env:ProgramFiles\GDScript Lab\gdscript-lab.exe"
+          )
+          $exe = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $exe) { throw 'Installed NSIS executable not found' }
+          $app = Start-Process -FilePath $exe -PassThru
+          Start-Sleep -Seconds 8
+          $app.Refresh()
+          if ($app.HasExited) { throw "NSIS-installed app exited early: $($app.ExitCode)" }
+          Write-Host "PASS: NSIS-installed app stayed alive; PID=$($app.Id)"
+          Stop-Process -Id $app.Id -Force
+          $uninstaller = Get-ChildItem (Split-Path $exe) -Filter '*uninstall*.exe' | Select-Object -First 1
+          if (-not $uninstaller) { throw 'NSIS uninstaller not found' }
+          $u = Start-Process -FilePath $uninstaller.FullName -ArgumentList '/S' -Wait -PassThru
+          if ($u.ExitCode -ne 0) { throw "NSIS uninstall failed: $($u.ExitCode)" }
+
+  linux-deb:
+    name: Exact Linux DEB install/launch/remove
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: GDScript-Lab-v1.0.0-FINAL-Linux-x64
+          path: artifact
+          repository: ${{ github.repository }}
+          run-id: ${{ env.FINAL_BUILD_RUN_ID }}
+          github-token: ${{ github.token }}
+      - name: Install runtime prerequisites and exact DEB
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y xvfb libwebkit2gtk-4.1-0 libayatana-appindicator3-1 librsvg2-2 libgtk-3-0
+          DEB="$(find artifact -type f -name '*.deb' -print -quit)"
+          test -n "$DEB"
+          sudo apt-get install -y "./$DEB"
+          test -x /usr/bin/gdscript-lab
+      - name: Launch exact installed DEB and require it to stay alive
+        shell: bash
+        run: |
+          set -euo pipefail
+          Xvfb :99 -screen 0 1280x800x24 >/tmp/xvfb.log 2>&1 &
+          XVFB_PID=$!
+          trap 'kill $XVFB_PID 2>/dev/null || true' EXIT
+          export DISPLAY=:99
+          sleep 2
+          /usr/bin/gdscript-lab >/tmp/gdscript-lab.log 2>&1 &
+          APP_PID=$!
+          sleep 8
+          if ! kill -0 "$APP_PID" 2>/dev/null; then
+            cat /tmp/gdscript-lab.log || true
+            exit 1
+          fi
+          echo "PASS: DEB-installed app stayed alive; PID=$APP_PID"
+          kill "$APP_PID" || true
+      - name: Remove DEB package
+        run: sudo apt-get remove -y gdscript-lab
+
+  android-release-runtime:
+    name: Exact Android release payload emulator launch
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: GDScript-Lab-v1.0.0-FINAL-Android-Unsigned
+          path: artifact
+          repository: ${{ github.repository }}
+          run-id: ${{ env.FINAL_BUILD_RUN_ID }}
+          github-token: ${{ github.token }}
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v4
+      - name: Install signing/build tools and sign exact CI APK with ephemeral QA key
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdkmanager 'platform-tools' 'build-tools;36.0.0'
+          APK="$(find artifact -type f -name '*release-unsigned.apk' -print -quit)"
+          test -n "$APK"
+          keytool -genkeypair -noprompt -keystore "$RUNNER_TEMP/qa.jks" -storepass qa123456 -keypass qa123456 -alias qa -keyalg RSA -keysize 2048 -validity 30 -dname 'CN=GDScript Lab CI QA'
+          "$ANDROID_HOME/build-tools/36.0.0/zipalign" -f 4 "$APK" "$RUNNER_TEMP/gdlab-aligned.apk"
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" sign --ks "$RUNNER_TEMP/qa.jks" --ks-key-alias qa --ks-pass pass:qa123456 --key-pass pass:qa123456 --out "$RUNNER_TEMP/gdlab-qa.apk" "$RUNNER_TEMP/gdlab-aligned.apk"
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify -v "$RUNNER_TEMP/gdlab-qa.apk"
+          echo "QA_APK=$RUNNER_TEMP/gdlab-qa.apk" >> "$GITHUB_ENV"
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm || true
+      - name: Install and launch exact release payload on Android emulator
+        uses: ReactiveCircus/android-emulator-runner@v2.38.0
+        with:
+          api-level: 35
+          arch: x86_64
+          target: google_apis
+          disable-animations: true
+          script: |
+            set -euo pipefail
+            adb install -r "$QA_APK"
+            adb shell monkey -p com.jbhprods.gdscriptlab -c android.intent.category.LAUNCHER 1
+            sleep 10
+            PID="$(adb shell pidof com.jbhprods.gdscriptlab | tr -d '\r')"
+            if [ -z "$PID" ]; then
+              adb logcat -d | tail -n 300
+              exit 1
+            fi
+            echo "PASS: Android release payload process is alive; PID=$PID"
+            adb shell dumpsys package com.jbhprods.gdscriptlab | grep -E 'versionName=|versionCode=' | head
+            if adb logcat -d | grep -E 'FATAL EXCEPTION.*com\.jbhprods\.gdscriptlab|Process: com\.jbhprods\.gdscriptlab.*FATAL' -q; then
+              adb logcat -d | tail -n 300
+              exit 1
+            fi
