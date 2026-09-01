@@ -54,7 +54,7 @@ jobs:
           PY
       - name: Build Windows executable
         working-directory: ${{ env.PROJECT_DIR }}
-        run: npm run tauri -- build --bundles nsis
+        run: cargo build --release --manifest-path src-tauri/Cargo.toml
       - name: Launch executable and require it to stay alive
         working-directory: ${{ env.PROJECT_DIR }}
         shell: pwsh
