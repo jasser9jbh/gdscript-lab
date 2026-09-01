@@ -1,0 +1,271 @@
+name: Build GDScript Lab from verified production ZIP
+
+on:
+  push:
+    paths:
+      - '*.zip'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gdscript-lab-v1-native-builds
+  cancel-in-progress: false
+
+env:
+  EXPECTED_ZIP_SHA256: 59e7c1599c6438d2372c022ad4a18c272b7cc6cc27f016944c6b0626e0a1a761
+  PROJECT_DIR: _incoming/GDScript_Lab_Tauri_v1.0.0
+  NODE_VERSION: '22.16.0'
+  PYTHON_VERSION: '3.13'
+  RUST_VERSION: '1.98.0'
+
+jobs:
+  source-audit:
+    name: Verify production source
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Locate, verify and unpack production ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP="$(find . -maxdepth 1 -type f -name 'GDScript_Lab_v1.0.0_Tauri_Production_Project_FINAL*.zip' -print -quit)"
+          test -n "$ZIP"
+          ACTUAL="$(sha256sum "$ZIP" | awk '{print $1}')"
+          echo "ZIP SHA-256: $ACTUAL"
+          test "$ACTUAL" = "$EXPECTED_ZIP_SHA256"
+          rm -rf _incoming
+          mkdir -p _incoming
+          python -m zipfile -e "$ZIP" _incoming
+          test -f "$PROJECT_DIR/scripts/audit.py"
+      - name: Run source audit
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: python scripts/audit.py
+      - name: Verify frozen inventory manifest
+        working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          m=json.load(open('BUILD_MANIFEST.json',encoding='utf-8'))
+          assert m['version']=='1.0.0'
+          assert m['identifier']=='com.jbhprods.gdscriptlab'
+          assert m['course_data_byte_identical'] is True
+          assert m['code_blocks_identical']==183
+          assert m['inventory']=={'modules':27,'lessons':171,'code_command_blocks':183,'glossary':310,'reference':143,'projects':10}
+          print('Manifest inventory PASS')
+          PY
+
+  desktop:
+    name: ${{ matrix.name }}
+    needs: source-audit
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x64 (AppImage + DEB)
+            os: ubuntu-22.04
+            bundles: appimage,deb
+            artifact: GDScript-Lab-v1.0.0-Linux-x64
+          - name: Windows x64 (NSIS + MSI)
+            os: windows-latest
+            bundles: nsis,msi
+            artifact: GDScript-Lab-v1.0.0-Windows-x64
+          - name: macOS Apple Silicon (APP + DMG)
+            os: macos-latest
+            bundles: app,dmg
+            artifact: GDScript-Lab-v1.0.0-macOS-arm64
+            target: aarch64-apple-darwin
+          - name: macOS Intel (APP + DMG)
+            os: macos-latest
+            bundles: app,dmg
+            artifact: GDScript-Lab-v1.0.0-macOS-x64
+            target: x86_64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Linux prerequisites
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf xdg-utils
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: ${{ matrix.target || '' }}
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './_incoming/GDScript_Lab_Tauri_v1.0.0/src-tauri -> target'
+      - name: Verify and unpack production ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP="$(find . -maxdepth 1 -type f -name 'GDScript_Lab_v1.0.0_Tauri_Production_Project_FINAL*.zip' -print -quit)"
+          test -n "$ZIP"
+          if command -v sha256sum >/dev/null 2>&1; then ACTUAL="$(sha256sum "$ZIP" | awk '{print $1}')"; else ACTUAL="$(shasum -a 256 "$ZIP" | awk '{print $1}')"; fi
+          test "$ACTUAL" = "$EXPECTED_ZIP_SHA256"
+          rm -rf _incoming && mkdir -p _incoming
+          python -m zipfile -e "$ZIP" _incoming
+      - name: Install frontend/Tauri dependencies
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: npm install
+      - name: Rebuild native icons
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: npm run icons
+      - name: Audit frozen source
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: python scripts/audit.py
+      - name: Build native desktop bundle
+        working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "${{ matrix.target || '' }}" ]; then
+            npm run tauri -- build --target "${{ matrix.target }}" --bundles "${{ matrix.bundles }}"
+          else
+            npm run tauri -- build --bundles "${{ matrix.bundles }}"
+          fi
+      - name: Upload desktop bundles
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          if-no-files-found: error
+          path: |
+            ${{ env.PROJECT_DIR }}/src-tauri/target/**/bundle/**/*.AppImage
+            ${{ env.PROJECT_DIR }}/src-tauri/target/**/bundle/**/*.deb
+            ${{ env.PROJECT_DIR }}/src-tauri/target/**/bundle/**/*.exe
+            ${{ env.PROJECT_DIR }}/src-tauri/target/**/bundle/**/*.msi
+            ${{ env.PROJECT_DIR }}/src-tauri/target/**/bundle/**/*.dmg
+            ${{ env.PROJECT_DIR }}/src-tauri/target/**/bundle/**/*.app/**
+
+  android:
+    name: Android (APK + AAB)
+    needs: source-audit
+    runs-on: ubuntu-22.04
+    env:
+      ANDROID_KEY_BASE64: ${{ secrets.ANDROID_KEY_BASE64 }}
+      ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+      ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+      ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - name: Install Android platform/build tools/NDK
+        shell: bash
+        run: |
+          sdkmanager 'platforms;android-36' 'build-tools;36.0.0' 'ndk;27.2.12479018'
+          echo "NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './_incoming/GDScript_Lab_Tauri_v1.0.0/src-tauri -> target'
+      - name: Verify and unpack production ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP="$(find . -maxdepth 1 -type f -name 'GDScript_Lab_v1.0.0_Tauri_Production_Project_FINAL*.zip' -print -quit)"
+          test -n "$ZIP"
+          ACTUAL="$(sha256sum "$ZIP" | awk '{print $1}')"
+          test "$ACTUAL" = "$EXPECTED_ZIP_SHA256"
+          rm -rf _incoming && mkdir -p _incoming
+          python -m zipfile -e "$ZIP" _incoming
+      - name: Install dependencies and audit
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          npm install
+          npm run icons
+          python scripts/audit.py
+      - name: Initialize Android project
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: npm run android:init
+      - name: Configure release signing when secrets exist
+        if: ${{ env.ANDROID_KEY_BASE64 != '' }}
+        working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
+        run: |
+          echo "$ANDROID_KEY_BASE64" | base64 --decode > "$RUNNER_TEMP/gdlab-upload.jks"
+          cat > src-tauri/gen/android/keystore.properties <<EOF
+          storePassword=${ANDROID_KEYSTORE_PASSWORD:-$ANDROID_KEY_PASSWORD}
+          keyPassword=$ANDROID_KEY_PASSWORD
+          keyAlias=$ANDROID_KEY_ALIAS
+          storeFile=$RUNNER_TEMP/gdlab-upload.jks
+          EOF
+          python scripts/patch-android-signing.py
+      - name: Build Android APK
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: npm run android:apk
+      - name: Build Android AAB
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: npm run android:aab
+      - name: Upload Android bundles
+        uses: actions/upload-artifact@v4
+        with:
+          name: GDScript-Lab-v1.0.0-Android
+          if-no-files-found: error
+          path: |
+            ${{ env.PROJECT_DIR }}/src-tauri/gen/android/app/build/outputs/**/*.apk
+            ${{ env.PROJECT_DIR }}/src-tauri/gen/android/app/build/outputs/**/*.aab
+
+  ios-compile:
+    name: iOS unsigned compile check
+    needs: source-audit
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: aarch64-apple-ios,x86_64-apple-ios,aarch64-apple-ios-sim
+      - name: Install CocoaPods
+        run: brew install cocoapods
+      - name: Verify and unpack production ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP="$(find . -maxdepth 1 -type f -name 'GDScript_Lab_v1.0.0_Tauri_Production_Project_FINAL*.zip' -print -quit)"
+          test -n "$ZIP"
+          ACTUAL="$(shasum -a 256 "$ZIP" | awk '{print $1}')"
+          test "$ACTUAL" = "$EXPECTED_ZIP_SHA256"
+          rm -rf _incoming && mkdir -p _incoming
+          python -m zipfile -e "$ZIP" _incoming
+      - name: Install dependencies and audit
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          npm install
+          npm run icons
+          python scripts/audit.py
+      - name: Initialize and compile iOS without signing
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          npm run ios:init
+          npm run ios:build
