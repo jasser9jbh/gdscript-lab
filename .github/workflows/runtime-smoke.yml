@@ -52,6 +52,9 @@ jobs:
           s=s.replace('tauri-plugin-fs = { version = "=2.5.1" }','tauri-plugin-fs = { version = "=2.5.2" }')
           p.write_text(s)
           PY
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './_incoming/GDScript_Lab_Tauri_v1.0.0/src-tauri -> target'
       - name: Build Windows executable
         working-directory: ${{ env.PROJECT_DIR }}
         run: cargo build --release --manifest-path src-tauri/Cargo.toml
@@ -114,6 +117,9 @@ jobs:
           p.write_text(s)
           PY
           npm run android:init
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './_incoming/GDScript_Lab_Tauri_v1.0.0/src-tauri -> target'
       - name: Build debug APK for emulator smoke test
         working-directory: ${{ env.PROJECT_DIR }}
         run: npm run tauri -- android build --debug --apk --ci
