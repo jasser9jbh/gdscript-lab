@@ -132,8 +132,8 @@ jobs:
           from pathlib import Path
           p = Path('src-tauri/Cargo.toml')
           s = p.read_text(encoding='utf-8')
-          old = 'tauri-build = "=2.5.6"'
-          new = 'tauri-build = "=2.6.3"'
+          old = 'tauri-build = { version = "=2.5.6" }'
+          new = 'tauri-build = { version = "=2.6.3" }'
           if old not in s:
               raise SystemExit('Expected tauri-build 2.5.6 pin not found')
           p.write_text(s.replace(old, new, 1), encoding='utf-8')
@@ -220,8 +220,8 @@ jobs:
           from pathlib import Path
           p = Path('src-tauri/Cargo.toml')
           s = p.read_text(encoding='utf-8')
-          old = 'tauri-build = "=2.5.6"'
-          new = 'tauri-build = "=2.6.3"'
+          old = 'tauri-build = { version = "=2.5.6" }'
+          new = 'tauri-build = { version = "=2.6.3" }'
           if old not in s:
               raise SystemExit('Expected tauri-build 2.5.6 pin not found')
           p.write_text(s.replace(old, new, 1), encoding='utf-8')
@@ -303,8 +303,8 @@ jobs:
           from pathlib import Path
           p = Path('src-tauri/Cargo.toml')
           s = p.read_text(encoding='utf-8')
-          old = 'tauri-build = "=2.5.6"'
-          new = 'tauri-build = "=2.6.3"'
+          old = 'tauri-build = { version = "=2.5.6" }'
+          new = 'tauri-build = { version = "=2.6.3" }'
           if old not in s:
               raise SystemExit('Expected tauri-build 2.5.6 pin not found')
           p.write_text(s.replace(old, new, 1), encoding='utf-8')
