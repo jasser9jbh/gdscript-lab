@@ -1,3 +1,4 @@
+# Final v1.0.0 reproducibility resolver
 name: Resolve final locks and license inventory
 
 on:
