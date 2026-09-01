@@ -162,7 +162,7 @@ jobs:
           target: google_apis
           disable-animations: true
           script: |
-            set -euo pipefail
+            set -eu
             adb install -r "$QA_APK"
             adb shell monkey -p com.jbhprods.gdscriptlab -c android.intent.category.LAUNCHER 1
             sleep 10
