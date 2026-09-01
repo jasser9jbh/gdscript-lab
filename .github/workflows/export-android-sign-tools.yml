@@ -25,10 +25,11 @@ jobs:
         run: |
           set -euo pipefail
           BT="$ANDROID_HOME/build-tools/36.0.0"
-          mkdir -p exported/lib
+          mkdir -p exported/lib exported/lib64
           cp "$BT/apksigner" exported/
           cp "$BT/zipalign" exported/
           cp "$BT/lib/apksigner.jar" exported/lib/
+          cp "$BT/lib64/libc++.so" exported/lib64/
           chmod +x exported/apksigner exported/zipalign
       - uses: actions/upload-artifact@v4
         with:
