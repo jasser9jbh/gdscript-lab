@@ -1,0 +1,184 @@
+name: Android 16 KB definitive production build
+
+on:
+  push:
+    paths:
+      - '.github/workflows/android-16k-definitive.yml'
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+env:
+  EXPECTED_ZIP_SHA256: 59e7c1599c6438d2372c022ad4a18c272b7cc6cc27f016944c6b0626e0a1a761
+  PROJECT_DIR: _incoming/GDScript_Lab_Tauri_v1.0.0
+  NDK_VERSION: '29.0.14206865'
+  ICON_DONOR_RUN_ID: '33553834065'
+
+jobs:
+  android-16k:
+    name: API36 / NDK r29 / 16KB exact release + emulator
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.16.0'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v4
+      - name: Install Android API36 / Build Tools 36 / NDK r29
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdkmanager 'platform-tools' 'platforms;android-36' 'build-tools;36.0.0' "ndk;${NDK_VERSION}"
+          echo "NDK_HOME=$ANDROID_HOME/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.98.0'
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+      - uses: actions/download-artifact@v4
+        with:
+          name: GDScript-Lab-v1.0.0-FINAL-Android-Unsigned
+          path: icon-donor
+          repository: ${{ github.repository }}
+          run-id: ${{ env.ICON_DONOR_RUN_ID }}
+          github-token: ${{ github.token }}
+      - name: Verify immutable source and prepare locked native workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP="$(find . -maxdepth 1 -type f -name 'GDScript_Lab_v1.0.0_Tauri_Production_Project_FINAL*.zip' -print -quit)"
+          test -n "$ZIP"
+          test "$(sha256sum "$ZIP" | awk '{print $1}')" = "$EXPECTED_ZIP_SHA256"
+          rm -rf _incoming && mkdir -p _incoming
+          python -m zipfile -e "$ZIP" _incoming
+          cd "$PROJECT_DIR"
+          python scripts/audit.py
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('src-tauri/Cargo.toml')
+          s=p.read_text(encoding='utf-8')
+          s=s.replace('tauri-build = { version = "=2.5.6" }','tauri-build = { version = "=2.6.3" }')
+          s=s.replace('tauri-plugin-fs = { version = "=2.5.1" }','tauri-plugin-fs = { version = "=2.5.2" }')
+          if '=2.5.6' in s or '=2.5.1' in s:
+              raise SystemExit('Tauri dependency finalization failed')
+          p.write_text(s,encoding='utf-8')
+          PY
+          npm install
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './_incoming/GDScript_Lab_Tauri_v1.0.0/src-tauri -> target'
+      - name: Initialize Android and install canonical launcher assets
+        working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run android:init
+          DONOR_AAB="$(find "$GITHUB_WORKSPACE/icon-donor" -type f -name '*.aab' -print -quit)"
+          test -n "$DONOR_AAB"
+          rm -rf "$RUNNER_TEMP/icon-donor" && mkdir -p "$RUNNER_TEMP/icon-donor"
+          unzip -q "$DONOR_AAB" 'base/res/mipmap-*-v4/ic_launcher*.png' -d "$RUNNER_TEMP/icon-donor"
+          RES='src-tauri/gen/android/app/src/main/res'
+          for density in mdpi hdpi xhdpi xxhdpi xxxhdpi; do
+            SRC="$RUNNER_TEMP/icon-donor/base/res/mipmap-${density}-v4"
+            test -f "$SRC/ic_launcher.png"
+            test -f "$SRC/ic_launcher_round.png"
+            test -f "$SRC/ic_launcher_foreground.png"
+            DEST="$(find "$RES" -maxdepth 1 -type d -name "mipmap-${density}*" -print -quit)"
+            if [ -z "$DEST" ]; then DEST="$RES/mipmap-${density}"; mkdir -p "$DEST"; fi
+            cp "$SRC/ic_launcher.png" "$DEST/ic_launcher.png"
+            cp "$SRC/ic_launcher_round.png" "$DEST/ic_launcher_round.png"
+            cp "$SRC/ic_launcher_foreground.png" "$DEST/ic_launcher_foreground.png"
+          done
+          mkdir -p "$RES/values" "$RES/mipmap-anydpi-v26"
+          printf '%s\n' '<?xml version="1.0" encoding="utf-8"?>' '<resources><color name="gdlab_icon_bg">#14171C</color></resources>' > "$RES/values/gdlab_icon_colors.xml"
+          printf '%s\n' '<?xml version="1.0" encoding="utf-8"?>' '<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">' '  <background android:drawable="@color/gdlab_icon_bg" />' '  <foreground android:drawable="@mipmap/ic_launcher_foreground" />' '</adaptive-icon>' > "$RES/mipmap-anydpi-v26/ic_launcher.xml"
+          cp "$RES/mipmap-anydpi-v26/ic_launcher.xml" "$RES/mipmap-anydpi-v26/ic_launcher_round.xml"
+      - name: Build APK and AAB with NDK r29
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          npm run android:apk
+          npm run android:aab
+      - name: Require API36 metadata, 16KB APK ZIP alignment, and 16KB ELF alignment
+        working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK="$(find src-tauri/gen/android/app/build/outputs -type f -name '*release-unsigned.apk' -print -quit)"
+          AAB="$(find src-tauri/gen/android/app/build/outputs -type f -name '*.aab' -print -quit)"
+          test -n "$APK" && test -n "$AAB"
+          "$ANDROID_HOME/build-tools/36.0.0/aapt" dump badging "$APK" | tee "$RUNNER_TEMP/APK_BADGING_16K.txt"
+          grep -q "package: name='com.jbhprods.gdscriptlab'" "$RUNNER_TEMP/APK_BADGING_16K.txt"
+          grep -q "versionName='1.0.0'" "$RUNNER_TEMP/APK_BADGING_16K.txt"
+          grep -q "targetSdkVersion:'36'" "$RUNNER_TEMP/APK_BADGING_16K.txt"
+          "$ANDROID_HOME/build-tools/36.0.0/zipalign" -c -P 16 -v 4 "$APK" > "$RUNNER_TEMP/APK_ZIPALIGN_16K.txt"
+          rm -rf "$RUNNER_TEMP/apk-elf" "$RUNNER_TEMP/aab-elf"
+          mkdir -p "$RUNNER_TEMP/apk-elf" "$RUNNER_TEMP/aab-elf"
+          unzip -q "$APK" 'lib/*/*.so' -d "$RUNNER_TEMP/apk-elf"
+          unzip -q "$AAB" 'base/lib/*/*.so' -d "$RUNNER_TEMP/aab-elf"
+          READELF="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
+          python - "$READELF" "$RUNNER_TEMP/apk-elf" "$RUNNER_TEMP/aab-elf" <<'PY'
+          import pathlib,re,subprocess,sys
+          readelf=sys.argv[1]; checked=[]
+          for root in map(pathlib.Path,sys.argv[2:]):
+              for so in sorted(root.rglob('*.so')):
+                  out=subprocess.check_output([readelf,'-lW',str(so)],text=True)
+                  aligns=[int(line.split()[-1],16) for line in out.splitlines() if re.match(r'^\s*LOAD\s',line)]
+                  if not aligns or min(aligns)<0x4000:
+                      raise SystemExit(f'16KB ELF FAIL: {so} LOAD aligns={aligns}')
+                  print(f'PASS 16KB ELF {min(aligns):#x}: {so}')
+                  checked.append(str(so))
+          if not checked: raise SystemExit('No native libraries found')
+          print(f'PASS: {len(checked)} APK/AAB native-library payloads are >=16KB aligned')
+          PY
+      - name: Upload 16KB-qualified unsigned release payloads before runtime QA
+        uses: actions/upload-artifact@v4
+        with:
+          name: GDScript-Lab-v1.0.0-DEFINITIVE-Android-16K-Unsigned
+          if-no-files-found: error
+          retention-days: 90
+          path: |
+            ${{ env.PROJECT_DIR }}/src-tauri/gen/android/app/build/outputs/**/*.apk
+            ${{ env.PROJECT_DIR }}/src-tauri/gen/android/app/build/outputs/**/*.aab
+            ${{ runner.temp }}/APK_BADGING_16K.txt
+            ${{ runner.temp }}/APK_ZIPALIGN_16K.txt
+      - name: Sign exact release APK with ephemeral QA key
+        working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK="$(find src-tauri/gen/android/app/build/outputs -type f -name '*release-unsigned.apk' -print -quit)"
+          keytool -genkeypair -noprompt -keystore "$RUNNER_TEMP/qa.jks" -storepass qa123456 -keypass qa123456 -alias qa -keyalg RSA -keysize 2048 -validity 30 -dname 'CN=GDScript Lab 16KB CI QA'
+          "$ANDROID_HOME/build-tools/36.0.0/zipalign" -f -P 16 4 "$APK" "$RUNNER_TEMP/gdlab-aligned.apk"
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" sign --ks "$RUNNER_TEMP/qa.jks" --ks-key-alias qa --ks-pass pass:qa123456 --key-pass pass:qa123456 --out "$RUNNER_TEMP/gdlab-qa.apk" "$RUNNER_TEMP/gdlab-aligned.apk"
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify -v "$RUNNER_TEMP/gdlab-qa.apk"
+          echo "QA_APK=$RUNNER_TEMP/gdlab-qa.apk" >> "$GITHUB_ENV"
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm || true
+      - name: Install and launch exact release payload on Android 15 16KB emulator
+        uses: ReactiveCircus/android-emulator-runner@v2.38.0
+        with:
+          api-level: 35
+          arch: x86_64
+          target: google_apis_ps16k
+          disable-animations: true
+          script: |
+            adb shell getconf PAGE_SIZE | tr -d '\r' | grep -x '16384'
+            adb install -r "$QA_APK"
+            adb shell monkey -p com.jbhprods.gdscriptlab -c android.intent.category.LAUNCHER 1
+            sleep 10
+            adb shell pidof com.jbhprods.gdscriptlab | tr -d '\r' | grep -Eq '^[0-9]+'
+            adb logcat -d > /tmp/gdlab-logcat.txt
+            ! grep -E 'FATAL EXCEPTION.*com\.jbhprods\.gdscriptlab|Process: com\.jbhprods\.gdscriptlab.*FATAL' /tmp/gdlab-logcat.txt
+            echo 'PASS: exact NDK r29 release payload stayed alive on Android 15 16KB emulator.'
