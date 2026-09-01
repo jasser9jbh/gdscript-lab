@@ -1,0 +1,84 @@
+name: Final Android runtime validation
+
+on:
+  push:
+    paths:
+      - '.github/workflows/final-android-runtime.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  android-runtime:
+    name: Exact final APK emulator launch
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v4
+      - name: Install Android signing tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdkmanager 'platform-tools' 'build-tools;36.0.0'
+      - name: Download exact final Android build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: GDScript-Lab-v1.0.0-FINAL-Android-Unsigned
+          path: final-android
+          repository: jasser9jbh/gdscript-lab
+          run-id: 33553834065
+          github-token: ${{ github.token }}
+      - name: Prepare exact APK for emulator installation
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK="$(find final-android -type f -name '*.apk' -print -quit)"
+          test -n "$APK"
+          keytool -genkeypair -v -keystore "$RUNNER_TEMP/emulator-only.jks" -storepass emulatoronly -keypass emulatoronly -alias emulatoronly -keyalg RSA -keysize 2048 -validity 2 -dname 'CN=CI Emulator Only,O=Temporary QA' >/dev/null 2>&1
+          "$ANDROID_HOME/build-tools/36.0.0/zipalign" -f 4 "$APK" "$RUNNER_TEMP/final-aligned.apk"
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" sign --ks "$RUNNER_TEMP/emulator-only.jks" --ks-key-alias emulatoronly --ks-pass pass:emulatoronly --key-pass pass:emulatoronly --out "$RUNNER_TEMP/final-emulator.apk" "$RUNNER_TEMP/final-aligned.apk"
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose "$RUNNER_TEMP/final-emulator.apk"
+      - name: Enable KVM
+        shell: bash
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm || true
+      - name: Install and launch exact final APK on Android 35 emulator
+        uses: ReactiveCircus/android-emulator-runner@v2.38.0
+        with:
+          api-level: 35
+          arch: x86_64
+          target: google_apis
+          disable-animations: true
+          script: |
+            set -euo pipefail
+            adb install -r "$RUNNER_TEMP/final-emulator.apk"
+            adb logcat -c
+            adb shell monkey -p com.jbhprods.gdscriptlab -c android.intent.category.LAUNCHER 1
+            sleep 10
+            PID="$(adb shell pidof com.jbhprods.gdscriptlab | tr -d '\r')"
+            test -n "$PID"
+            echo "PASS: exact final Android app process remained alive; PID=$PID"
+            adb shell dumpsys package com.jbhprods.gdscriptlab | grep -E 'versionName=|versionCode=' | head -n 4
+            adb shell dumpsys activity activities | grep -m1 -E 'mResumedActivity|topResumedActivity' || true
+            adb exec-out screencap -p > final-android-runtime.png
+            adb logcat -d -t 500 > final-android-logcat.txt
+            if grep -E 'FATAL EXCEPTION|AndroidRuntime.*FATAL|Process: com\.jbhprods\.gdscriptlab.*crash' final-android-logcat.txt; then
+              echo 'Fatal app crash detected in logcat'
+              exit 1
+            fi
+      - name: Upload runtime evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: GDScript-Lab-v1.0.0-FINAL-Android-Runtime-Evidence
+          if-no-files-found: warn
+          path: |
+            final-android-runtime.png
+            final-android-logcat.txt
