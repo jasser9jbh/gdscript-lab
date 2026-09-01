@@ -1,0 +1,276 @@
+name: Final v1.0.0 icon-correct native rebuild
+
+on:
+  push:
+    paths:
+      - '.github/workflows/final-icon-rebuild.yml'
+      - '.github/scripts/finalize_native_build.py'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gdscript-lab-v1-final-icon-rebuild
+  cancel-in-progress: false
+
+env:
+  EXPECTED_ZIP_SHA256: 59e7c1599c6438d2372c022ad4a18c272b7cc6cc27f016944c6b0626e0a1a761
+  PROJECT_DIR: _incoming/GDScript_Lab_Tauri_v1.0.0
+  NODE_VERSION: '22.16.0'
+  PYTHON_VERSION: '3.13'
+  RUST_VERSION: '1.98.0'
+
+jobs:
+  source-audit:
+    name: Verify immutable production source
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Verify and extract source ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP='GDScript_Lab_v1.0.0_Tauri_Production_Project_FINAL.zip'
+          test -f "$ZIP"
+          test "$(sha256sum "$ZIP" | awk '{print $1}')" = "$EXPECTED_ZIP_SHA256"
+          rm -rf _incoming && mkdir -p _incoming
+          python -m zipfile -e "$ZIP" _incoming
+      - name: Run frozen source audit
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: python scripts/audit.py
+      - name: Verify educational inventory
+        working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          m=json.load(open('BUILD_MANIFEST.json',encoding='utf-8'))
+          assert m['version']=='1.0.0'
+          assert m['identifier']=='com.jbhprods.gdscriptlab'
+          assert m['course_data_byte_identical'] is True
+          assert m['code_blocks_identical']==183
+          assert m['inventory']=={'modules':27,'lessons':171,'code_command_blocks':183,'glossary':310,'reference':143,'projects':10}
+          print('Frozen educational inventory PASS')
+          PY
+
+  desktop:
+    name: ${{ matrix.name }}
+    needs: source-audit
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x64 FINAL
+            os: ubuntu-22.04
+            bundles: appimage,deb
+            artifact: GDScript-Lab-v1.0.0-FINAL-Linux-x64
+          - name: Windows x64 FINAL
+            os: windows-latest
+            bundles: nsis,msi
+            artifact: GDScript-Lab-v1.0.0-FINAL-Windows-x64
+          - name: macOS Apple Silicon FINAL
+            os: macos-latest
+            bundles: app,dmg
+            artifact: GDScript-Lab-v1.0.0-FINAL-macOS-arm64
+            target: aarch64-apple-darwin
+          - name: macOS Intel FINAL
+            os: macos-latest
+            bundles: app,dmg
+            artifact: GDScript-Lab-v1.0.0-FINAL-macOS-x64
+            target: x86_64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install Pillow
+        run: python -m pip install --disable-pip-version-check pillow
+      - name: Linux prerequisites
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf xdg-utils
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: ${{ matrix.target || '' }}
+      - name: Verify and extract immutable source
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP='GDScript_Lab_v1.0.0_Tauri_Production_Project_FINAL.zip'
+          if command -v sha256sum >/dev/null 2>&1; then H="$(sha256sum "$ZIP" | awk '{print $1}')"; else H="$(shasum -a 256 "$ZIP" | awk '{print $1}')"; fi
+          test "$H" = "$EXPECTED_ZIP_SHA256"
+          rm -rf _incoming && mkdir -p _incoming
+          python -m zipfile -e "$ZIP" _incoming
+      - name: Audit before native-only finalization
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: python scripts/audit.py
+      - name: Apply proven native dependency fixes and canonical icon
+        shell: bash
+        run: python "$GITHUB_WORKSPACE/.github/scripts/finalize_native_build.py" prepare --project "$GITHUB_WORKSPACE/$PROJECT_DIR"
+      - name: Install Tauri dependencies
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: npm install
+      - name: Generate platform icon pack from canonical icon
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: npm run icons
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './_incoming/GDScript_Lab_Tauri_v1.0.0/src-tauri -> target'
+      - name: Build final desktop bundle
+        working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "${{ matrix.target || '' }}" ]; then
+            npm run tauri -- build --target "${{ matrix.target }}" --bundles "${{ matrix.bundles }}"
+          else
+            npm run tauri -- build --bundles "${{ matrix.bundles }}"
+          fi
+      - name: Upload final desktop bundles and icon evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          if-no-files-found: error
+          path: |
+            ${{ env.PROJECT_DIR }}/src-tauri/target/**/bundle/**/*.AppImage
+            ${{ env.PROJECT_DIR }}/src-tauri/target/**/bundle/**/*.deb
+            ${{ env.PROJECT_DIR }}/src-tauri/target/**/bundle/**/*.exe
+            ${{ env.PROJECT_DIR }}/src-tauri/target/**/bundle/**/*.msi
+            ${{ env.PROJECT_DIR }}/src-tauri/target/**/bundle/**/*.dmg
+            ${{ env.PROJECT_DIR }}/src-tauri/target/**/bundle/**/*.app/**
+            ${{ env.PROJECT_DIR }}/src-tauri/icons/icon.ico
+            ${{ env.PROJECT_DIR }}/src-tauri/icons/icon.icns
+            ${{ env.PROJECT_DIR }}/src-tauri/icons/icon.png
+
+  android:
+    name: Android FINAL (unsigned CI APK + AAB)
+    needs: source-audit
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install Pillow
+        run: python -m pip install --disable-pip-version-check pillow
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v4
+      - name: Install Android SDK/NDK
+        shell: bash
+        run: |
+          sdkmanager 'platforms;android-36' 'build-tools;36.0.0' 'ndk;27.2.12479018'
+          echo "NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+      - name: Verify and extract immutable source
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP='GDScript_Lab_v1.0.0_Tauri_Production_Project_FINAL.zip'
+          test "$(sha256sum "$ZIP" | awk '{print $1}')" = "$EXPECTED_ZIP_SHA256"
+          rm -rf _incoming && mkdir -p _incoming
+          python -m zipfile -e "$ZIP" _incoming
+      - name: Audit before native-only finalization
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: python scripts/audit.py
+      - name: Apply proven dependency fixes and canonical icon
+        shell: bash
+        run: python "$GITHUB_WORKSPACE/.github/scripts/finalize_native_build.py" prepare --project "$GITHUB_WORKSPACE/$PROJECT_DIR"
+      - name: Install dependencies and generate Tauri icons
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          npm install
+          npm run icons
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './_incoming/GDScript_Lab_Tauri_v1.0.0/src-tauri -> target'
+      - name: Initialize Android project
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: npm run android:init
+      - name: Replace generated Android launcher/adaptive icons with real GDScript Lab logo
+        shell: bash
+        run: python "$GITHUB_WORKSPACE/.github/scripts/finalize_native_build.py" android-icons --project "$GITHUB_WORKSPACE/$PROJECT_DIR"
+      - name: Verify generated Android icon resources
+        shell: bash
+        run: |
+          set -euo pipefail
+          find "$PROJECT_DIR/src-tauri/gen/android/app/src/main/res" -path '*mipmap*' -name 'ic_launcher*' -print
+          test "$(find "$PROJECT_DIR/src-tauri/gen/android/app/src/main/res" -name 'ic_launcher.png' | wc -l)" -ge 5
+          test "$(find "$PROJECT_DIR/src-tauri/gen/android/app/src/main/res" -name 'ic_launcher_foreground.png' | wc -l)" -ge 5
+      - name: Build final Android APK
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: npm run android:apk
+      - name: Build final Android AAB
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: npm run android:aab
+      - name: Upload final Android bundles
+        uses: actions/upload-artifact@v4
+        with:
+          name: GDScript-Lab-v1.0.0-FINAL-Android-Unsigned
+          if-no-files-found: error
+          path: |
+            ${{ env.PROJECT_DIR }}/src-tauri/gen/android/app/build/outputs/**/*.apk
+            ${{ env.PROJECT_DIR }}/src-tauri/gen/android/app/build/outputs/**/*.aab
+            ${{ env.PROJECT_DIR }}/src-tauri/gen/android/app/src/main/res/mipmap-*/ic_launcher*.png
+            ${{ env.PROJECT_DIR }}/src-tauri/gen/android/app/src/main/res/mipmap-anydpi-v26/*.xml
+
+  ios-compile:
+    name: iOS FINAL unsigned compile check
+    needs: source-audit
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install Pillow
+        run: python -m pip install --disable-pip-version-check pillow
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: aarch64-apple-ios,x86_64-apple-ios,aarch64-apple-ios-sim
+      - name: Install CocoaPods
+        run: brew install cocoapods
+      - name: Verify and extract immutable source
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP='GDScript_Lab_v1.0.0_Tauri_Production_Project_FINAL.zip'
+          test "$(shasum -a 256 "$ZIP" | awk '{print $1}')" = "$EXPECTED_ZIP_SHA256"
+          rm -rf _incoming && mkdir -p _incoming
+          python -m zipfile -e "$ZIP" _incoming
+      - name: Audit, finalize icon/dependencies, install
+        shell: bash
+        run: |
+          cd "$PROJECT_DIR"
+          python scripts/audit.py
+          python "$GITHUB_WORKSPACE/.github/scripts/finalize_native_build.py" prepare --project "$GITHUB_WORKSPACE/$PROJECT_DIR"
+          npm install
+          npm run icons
+      - name: Initialize and compile iOS without signing
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          npm run ios:init
+          npm run ios:build
