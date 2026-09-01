@@ -44,6 +44,29 @@ No shell plugin, HTTP plugin, updater, broad filesystem read permission or telem
 - Tauri crate 2.11.5
 - Tauri CLI 2.11.4
 
+## v1.0.0 native validation
+
+GitHub Actions run `33530186802` passed the immutable source audit and completed successfully for:
+
+- Windows x64: NSIS + MSI
+- Linux x64: AppImage + DEB
+- macOS Apple Silicon: APP + DMG
+- macOS Intel: APP + DMG
+- Android: APK + AAB
+- iOS: unsigned native compile check
+
+The two dependency compatibility corrections proven by that matrix are `tauri-build = 2.6.3` and `tauri-plugin-fs = 2.5.2`. A definitive corrected source archive was subsequently generated with those pins and a resolved `Cargo.lock`; its SHA-256 is `13dbe46398d771782b335287ec73b758ead357b0971a103690553130ab868a2d`.
+
+The Linux AppImage also passed a GUI smoke-launch test under Xvfb.
+
+### Android release identity
+
+The v1.0.0 Android direct-distribution APK is signed and verifies with APK Signature Scheme v2 and v3. The signed AAB also verifies. The permanent release certificate SHA-256 is:
+
+`39:0E:F4:40:9A:8B:6B:B7:DD:99:E1:CE:7E:14:EB:57:A4:6B:60:AA:55:71:01:B2:FF:D4:F1:FB:B7:A6:30:64`
+
+**The private Android keystore and passwords are intentionally not stored in this repository.** Keep the separate private signing backup secure and offline.
+
 ## Validation
 
 Run:
@@ -53,12 +76,4 @@ python scripts/check-build-env.py
 python scripts/audit.py
 ```
 
-The source package also contains the final validation evidence and the build-attempt report from the ChatGPT build environment.
-
-See:
-
-- `README_BUILD.md`
-- `README_DISTRIBUTION.md`
-- `RELEASE_CHECKLIST.md`
-- `BUILD_ATTEMPT_REPORT.md`
-- `THIRD_PARTY_NOTICES.md`
+See the source package documentation for build, distribution, release-checklist, and third-party-notice details.
