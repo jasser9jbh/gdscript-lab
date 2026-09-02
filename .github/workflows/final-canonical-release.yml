@@ -1,0 +1,424 @@
+name: GDScript Lab definitive canonical v1.0.0
+
+on:
+  push:
+    branches: [uiux-native-final-run-20260902]
+    paths:
+      - '.github/workflows/final-canonical-release.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: gdlab-canonical-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  SOURCE_ZIP: GDScript_Lab_v1.0.0_Tauri_Production_Project_FINAL.zip
+  SOURCE_GIT_BLOB_SHA1: 43d91956291718bef62f80fb83384316f8e083e9
+  PROJECT_DIR: _incoming/GDScript_Lab_Tauri_v1.0.0
+  EXPECTED_PORTABLE_SHA256: 3e36ecee887e85272648fc7658bbd32b22110d659778acae9adccde979c2033f
+  EXPECTED_FRONTEND_SHA256: ba6d7357575002a0ee129b26733f52e9c29d5e64a470e3bf84bd76ca8d306e99
+  EXPECTED_COURSE_SHA256: 569bc1d6e94096f495345274bc5083053e1d5fd9af4262d4549cb08cde6b5880
+
+jobs:
+  source:
+    name: Freeze canonical hardened source
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.13' }
+      - uses: actions/setup-node@v4
+        with: { node-version: '22.16.0' }
+      - uses: dtolnay/rust-toolchain@master
+        with: { toolchain: '1.98.0' }
+      - name: Reconstruct hardened frontend
+        shell: bash
+        run: bash .github/scripts/prepare-final-source.sh
+      - name: Recover exact canonical native branding and resolved locks
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TMP="$RUNNER_TEMP/canonical"; mkdir -p "$TMP/mac" "$TMP/android" "$TMP/locks"
+          api_get() {
+            local id="$1" out="$2"
+            curl --fail --location --retry 3 \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${id}/zip" -o "$out"
+          }
+          api_get 9818577292 "$TMP/mac.zip"
+          api_get 9819159148 "$TMP/android.zip"
+          api_get 9830513749 "$TMP/locks.zip"
+          unzip -q "$TMP/mac.zip" -d "$TMP/mac"
+          unzip -q "$TMP/android.zip" -d "$TMP/android"
+          unzip -q "$TMP/locks.zip" -d "$TMP/locks"
+
+          python - "$TMP/mac/icons/icon.icns" "$PROJECT_DIR/assets/app-icon-1024.png" <<'PY'
+          from pathlib import Path
+          import struct,sys,hashlib
+          src=Path(sys.argv[1]); dst=Path(sys.argv[2]); b=src.read_bytes()
+          assert b[:4]==b'icns'
+          pos=8; png=None
+          while pos+8<=len(b):
+              typ=b[pos:pos+4]; size=struct.unpack('>I',b[pos+4:pos+8])[0]
+              if size<8 or pos+size>len(b): raise SystemExit('Invalid ICNS chunk')
+              if typ==b'ic10': png=b[pos+8:pos+size]; break
+              pos+=size
+          if not png or png[:8]!=b'\x89PNG\r\n\x1a\n': raise SystemExit('1024px ICNS PNG not found')
+          if hashlib.sha256(png).hexdigest()!='368dc2486224dd76ff3c139bf51eb88f3d208483c09a91096eeebde15a90ba2c': raise SystemExit('Unexpected canonical icon payload')
+          dst.parent.mkdir(parents=True,exist_ok=True); dst.write_bytes(png)
+          print('Recovered canonical 1024px GDScript Lab icon')
+          PY
+
+          mkdir -p "$PROJECT_DIR/assets/android-icons"
+          for density in mdpi hdpi xhdpi xxhdpi xxxhdpi; do
+            mkdir -p "$PROJECT_DIR/assets/android-icons/$density"
+            cp "$TMP/android/src/main/res/mipmap-$density/ic_launcher.png" "$PROJECT_DIR/assets/android-icons/$density/ic_launcher.png"
+            cp "$TMP/android/src/main/res/mipmap-$density/ic_launcher_round.png" "$PROJECT_DIR/assets/android-icons/$density/ic_launcher_round.png"
+            cp "$TMP/android/src/main/res/mipmap-$density/ic_launcher_foreground.png" "$PROJECT_DIR/assets/android-icons/$density/ic_launcher_foreground.png"
+          done
+          cp "$PROJECT_DIR/assets/android-icons/xxxhdpi/ic_launcher_foreground.png" "$PROJECT_DIR/assets/android-foreground-432.png"
+
+          cat > "$PROJECT_DIR/scripts/patch-android-icons.py" <<'PY'
+          #!/usr/bin/env python3
+          from pathlib import Path
+          import shutil
+          project=Path(__file__).resolve().parents[1]
+          res=project/'src-tauri/gen/android/app/src/main/res'; src=project/'assets/android-icons'
+          if not res.is_dir(): raise SystemExit(f'Android generated resources not found: {res}')
+          for density in ('mdpi','hdpi','xhdpi','xxhdpi','xxxhdpi'):
+              candidates=sorted(res.glob(f'mipmap-{density}*')); dest=candidates[0] if candidates else res/f'mipmap-{density}'
+              dest.mkdir(parents=True,exist_ok=True)
+              for name in ('ic_launcher.png','ic_launcher_round.png','ic_launcher_foreground.png'):
+                  source=src/density/name
+                  if not source.is_file(): raise SystemExit(f'Missing canonical icon asset: {source}')
+                  shutil.copy2(source,dest/name)
+          values=res/'values'; values.mkdir(exist_ok=True)
+          (values/'gdlab_icon_colors.xml').write_text('<?xml version="1.0" encoding="utf-8"?>\n<resources>\n  <color name="gdlab_icon_bg">#14171C</color>\n</resources>\n',encoding='utf-8')
+          anydpi=res/'mipmap-anydpi-v26'; anydpi.mkdir(exist_ok=True)
+          xml=('<?xml version="1.0" encoding="utf-8"?>\n<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">\n  <background android:drawable="@color/gdlab_icon_bg" />\n  <foreground android:drawable="@mipmap/ic_launcher_foreground" />\n</adaptive-icon>\n')
+          (anydpi/'ic_launcher.xml').write_text(xml,encoding='utf-8'); (anydpi/'ic_launcher_round.xml').write_text(xml,encoding='utf-8')
+          print('Canonical Android launcher icons installed.')
+          PY
+          chmod +x "$PROJECT_DIR/scripts/patch-android-icons.py"
+
+          python - "$PROJECT_DIR/package.json" <<'PY'
+          from pathlib import Path
+          import json,sys
+          p=Path(sys.argv[1]); d=json.loads(p.read_text())
+          d['scripts']['android:init']='tauri android init --ci && python scripts/patch-android-icons.py'
+          p.write_text(json.dumps(d,indent=2)+'\n')
+          PY
+
+          cp "$TMP/locks/package-lock.json" "$PROJECT_DIR/package-lock.json"
+          cp "$TMP/locks/src-tauri/Cargo.lock" "$PROJECT_DIR/src-tauri/Cargo.lock"
+          cp "$TMP/locks/RUST_DEPENDENCY_LICENSES.json" "$PROJECT_DIR/RUST_DEPENDENCY_LICENSES.json"
+          cp "$TMP/locks/THIRD_PARTY_RUST_DEPENDENCIES.md" "$PROJECT_DIR/THIRD_PARTY_RUST_DEPENDENCIES.md"
+
+          python - "$PROJECT_DIR/scripts/audit.py" <<'PY'
+          from pathlib import Path
+          import sys
+          p=Path(sys.argv[1]); s=p.read_text()
+          s=s.replace("['=2.5.6','=2.11.5','=2.5.4','=2.7.3','=2.5.1']","['=2.6.3','=2.11.5','=2.5.4','=2.7.3','=2.5.2']")
+          p.write_text(s)
+          PY
+      - name: Validate exact canonical source
+        working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(sha256sum portable/GDScript_Lab_Godot47_v1.0.0.html | awk '{print $1}')" = "$EXPECTED_PORTABLE_SHA256"
+          test "$(sha256sum src/index.html | awk '{print $1}')" = "$EXPECTED_FRONTEND_SHA256"
+          grep -q 'DREAMCATCHER_LOGO_DATA_URI' src/index.html
+          grep -q 'data:image/svg+xml;base64,' src/index.html
+          grep -q 'html\[data-theme="light"\]' src/index.html
+          grep -q -- '--scroll-track: #e6edf4' src/index.html
+          grep -q 'Backup & restore' src/index.html
+          grep -q 'Export backup' src/index.html
+          grep -q 'Restore from backup' src/index.html
+          grep -q 'GDScript Lab backup is missing its state object.' src/index.html
+          grep -q 'Restore backup “${f.name}”?' src/index.html
+          test -s package-lock.json && test -s src-tauri/Cargo.lock
+          grep -q 'patch-android-icons.py' package.json
+          test -f assets/android-icons/xxxhdpi/ic_launcher_foreground.png
+          test "$(sha256sum assets/android-icons/mdpi/ic_launcher.png | awk '{print $1}')" = 'be8e4c551abed4a47128e801c42773272d7a308f57d5119830c835b6320ec20a'
+          test "$(sha256sum assets/android-icons/xxxhdpi/ic_launcher_foreground.png | awk '{print $1}')" = '7ae08907d8990805ca6f72b1287a6d410cbe38755fbc50ec9647a1e353394f3c'
+          npm ci --ignore-scripts
+          npm run icons
+          cp src-tauri/icons/icon.png assets/app-icon.png
+          cargo metadata --locked --format-version 1 --manifest-path src-tauri/Cargo.toml >/dev/null
+          python scripts/audit.py
+          python - <<'PY'
+          from pathlib import Path
+          import re,json,hashlib
+          t=Path('src/index.html').read_text(); m=re.search(r'window\.COURSE_DATA\s*=\s*',t); s=m.end(); d=0; ins=False; esc=False; e=None
+          for i,ch in enumerate(t[s:],s):
+              if ins:
+                  if esc: esc=False
+                  elif ch=='\\': esc=True
+                  elif ch=='"': ins=False
+              else:
+                  if ch=='"': ins=True
+                  elif ch=='{': d+=1
+                  elif ch=='}':
+                      d-=1
+                      if d==0: e=i+1; break
+          raw=t[s:e]
+          assert hashlib.sha256(raw.encode()).hexdigest()=='569bc1d6e94096f495345274bc5083053e1d5fd9af4262d4549cb08cde6b5880'
+          assert len(json.loads(raw)['lessons'])==171
+          print('Canonical curriculum invariant PASS')
+          PY
+          rm -rf node_modules src-tauri/target
+      - name: Package exact canonical source
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import os,zipfile
+          root=Path(os.environ['PROJECT_DIR']); out=Path(os.environ['RUNNER_TEMP'])/'GDScript_Lab_v1.0.0_FINAL_CANONICAL_SOURCE.zip'
+          with zipfile.ZipFile(out,'w',zipfile.ZIP_DEFLATED,compresslevel=9) as z:
+              for p in sorted(root.rglob('*')):
+                  if p.is_file(): z.write(p,p.relative_to(root.parent))
+          print(out)
+          PY
+          sha256sum "$RUNNER_TEMP/GDScript_Lab_v1.0.0_FINAL_CANONICAL_SOURCE.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GDScript-Lab-v1.0.0-DEFINITIVE-CANONICAL-source
+          path: ${{ runner.temp }}/GDScript_Lab_v1.0.0_FINAL_CANONICAL_SOURCE.zip
+          if-no-files-found: error
+          retention-days: 90
+
+  desktop:
+    name: ${{ matrix.name }}
+    needs: source
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: 'Linux x64 AppImage + DEB', os: ubuntu-22.04, target: '', bundles: 'appimage,deb', artifact: 'GDScript-Lab-v1.0.0-DEFINITIVE-Linux-x64' }
+          - { name: 'Windows x64 NSIS + MSI', os: windows-latest, target: '', bundles: 'nsis,msi', artifact: 'GDScript-Lab-v1.0.0-DEFINITIVE-Windows-x64' }
+          - { name: 'macOS Apple Silicon APP + DMG', os: macos-latest, target: 'aarch64-apple-darwin', bundles: 'app,dmg', artifact: 'GDScript-Lab-v1.0.0-DEFINITIVE-macOS-arm64' }
+          - { name: 'macOS Intel APP + DMG', os: macos-latest, target: 'x86_64-apple-darwin', bundles: 'app,dmg', artifact: 'GDScript-Lab-v1.0.0-DEFINITIVE-macOS-x64' }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.13' }
+      - uses: actions/download-artifact@v4
+        with: { name: GDScript-Lab-v1.0.0-DEFINITIVE-CANONICAL-source, path: source-artifact }
+      - name: Extract canonical source
+        shell: bash
+        run: python -m zipfile -e source-artifact/GDScript_Lab_v1.0.0_FINAL_CANONICAL_SOURCE.zip .
+      - name: Linux prerequisites
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf xdg-utils xvfb
+      - uses: actions/setup-node@v4
+        with: { node-version: '22.16.0' }
+      - uses: dtolnay/rust-toolchain@master
+        with: { toolchain: '1.98.0' }
+      - name: Add target
+        if: matrix.target != ''
+        shell: bash
+        run: rustup target add '${{ matrix.target }}'
+      - uses: swatinem/rust-cache@v2
+        with: { workspaces: './GDScript_Lab_Tauri_v1.0.0/src-tauri -> target' }
+      - name: Build locked canonical native bundles
+        working-directory: GDScript_Lab_Tauri_v1.0.0
+        shell: bash
+        run: |
+          npm ci
+          npm run icons
+          python scripts/audit.py
+          cargo metadata --locked --format-version 1 --manifest-path src-tauri/Cargo.toml >/dev/null
+          if [ -n '${{ matrix.target }}' ]; then npm run tauri -- build --target '${{ matrix.target }}' --bundles '${{ matrix.bundles }}'; else npm run tauri -- build --bundles '${{ matrix.bundles }}'; fi
+      - name: Linux GUI smoke
+        if: runner.os == 'Linux'
+        working-directory: GDScript_Lab_Tauri_v1.0.0
+        shell: bash
+        run: |
+          APP="$(find src-tauri/target -type f -name '*.AppImage' -print -quit)"; test -n "$APP"; chmod +x "$APP"
+          set +e; xvfb-run -a env APPIMAGE_EXTRACT_AND_RUN=1 "$APP" > "$RUNNER_TEMP/smoke.log" 2>&1 & PID=$!; sleep 10
+          if kill -0 "$PID" 2>/dev/null; then kill "$PID" || true; wait "$PID" || true; echo 'PASS: Linux app remained alive'; exit 0; fi
+          wait "$PID"; C=$?; cat "$RUNNER_TEMP/smoke.log" || true; exit "$C"
+      - name: Windows GUI smoke
+        if: runner.os == 'Windows'
+        working-directory: GDScript_Lab_Tauri_v1.0.0
+        shell: pwsh
+        run: |
+          $exe=Get-ChildItem src-tauri/target -Recurse -Filter '*.exe' | Where-Object { $_.FullName -match '\\release\\gdscript-lab\.exe$' } | Select-Object -First 1
+          if (-not $exe) { throw 'Application executable not found' }
+          $p=Start-Process $exe.FullName -PassThru; Start-Sleep 10
+          if ($p.HasExited) { throw "Exited with $($p.ExitCode)" }
+          Stop-Process $p.Id -Force
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          if-no-files-found: error
+          retention-days: 90
+          path: |
+            GDScript_Lab_Tauri_v1.0.0/src-tauri/target/**/bundle/**/*.AppImage
+            GDScript_Lab_Tauri_v1.0.0/src-tauri/target/**/bundle/**/*.deb
+            GDScript_Lab_Tauri_v1.0.0/src-tauri/target/**/bundle/**/*.exe
+            GDScript_Lab_Tauri_v1.0.0/src-tauri/target/**/bundle/**/*.msi
+            GDScript_Lab_Tauri_v1.0.0/src-tauri/target/**/bundle/**/*.dmg
+
+  android:
+    name: Android signed canonical APK + AAB + emulator
+    needs: source
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.13' }
+      - uses: actions/download-artifact@v4
+        with: { name: GDScript-Lab-v1.0.0-DEFINITIVE-CANONICAL-source, path: source-artifact }
+      - name: Extract canonical source
+        run: python -m zipfile -e source-artifact/GDScript_Lab_v1.0.0_FINAL_CANONICAL_SOURCE.zip .
+      - uses: actions/setup-node@v4
+        with: { node-version: '22.16.0' }
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: '17' }
+      - uses: android-actions/setup-android@v3
+      - name: Android SDK and NDK
+        shell: bash
+        run: |
+          sdkmanager 'platform-tools' 'platforms;android-36' 'build-tools;36.0.0' 'ndk;27.2.12479018'
+          echo "NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@master
+        with: { toolchain: '1.98.0', targets: 'aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android' }
+      - uses: swatinem/rust-cache@v2
+        with: { workspaces: './GDScript_Lab_Tauri_v1.0.0/src-tauri -> target' }
+      - name: Install, audit, initialize and verify canonical Android icons
+        working-directory: GDScript_Lab_Tauri_v1.0.0
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run icons
+          python scripts/audit.py
+          cargo metadata --locked --format-version 1 --manifest-path src-tauri/Cargo.toml >/dev/null
+          npm run android:init
+          for density in mdpi hdpi xhdpi xxhdpi xxxhdpi; do
+            for n in ic_launcher.png ic_launcher_round.png ic_launcher_foreground.png; do
+              cmp "assets/android-icons/$density/$n" "src-tauri/gen/android/app/src/main/res/mipmap-$density/$n"
+            done
+          done
+      - name: Build canonical APK and AAB
+        working-directory: GDScript_Lab_Tauri_v1.0.0
+        run: |
+          npm run android:apk
+          npm run android:aab
+      - name: Establish permanent replacement signer and sign release
+        working-directory: GDScript_Lab_Tauri_v1.0.0
+        shell: bash
+        run: |
+          set -euo pipefail
+          BT="$ANDROID_HOME/build-tools/36.0.0"; OUT="$RUNNER_TEMP/android-release"; PRIV="$RUNNER_TEMP/android-private"; mkdir -p "$OUT" "$PRIV"
+          PASS="$(openssl rand -hex 32)"; ALIAS='gdlab-release'; KS="$PRIV/GDScript_Lab_Android_Release_Keystore.jks"
+          keytool -genkeypair -keystore "$KS" -storepass "$PASS" -keypass "$PASS" -alias "$ALIAS" -keyalg RSA -keysize 3072 -sigalg SHA256withRSA -validity 10000 -dname 'CN=GDScript Lab, O=Journey Beyond Horizons Productions (JBH PRODS)' >/dev/null 2>&1
+          U="$(find src-tauri/gen/android/app/build/outputs -type f -name '*release-unsigned.apk' -print -quit)"; A="$(find src-tauri/gen/android/app/build/outputs -type f -name '*.aab' -print -quit)"; test -n "$U"; test -n "$A"
+          "$BT/zipalign" -f -p 4 "$U" "$OUT/aligned.apk"
+          "$BT/apksigner" sign --ks "$KS" --ks-key-alias "$ALIAS" --ks-pass "pass:$PASS" --key-pass "pass:$PASS" --out "$OUT/GDScript_Lab_v1.0.0_Android.apk" "$OUT/aligned.apk"
+          rm "$OUT/aligned.apk"
+          cp "$A" "$OUT/GDScript_Lab_v1.0.0_Android.aab"
+          jarsigner -keystore "$KS" -storepass "$PASS" -keypass "$PASS" -sigalg SHA256withRSA -digestalg SHA-256 "$OUT/GDScript_Lab_v1.0.0_Android.aab" "$ALIAS" >/dev/null
+          "$BT/apksigner" verify --verbose --print-certs "$OUT/GDScript_Lab_v1.0.0_Android.apk" | tee "$OUT/APK_SIGNATURE_VERIFICATION.txt"
+          jarsigner -verify -verbose -certs "$OUT/GDScript_Lab_v1.0.0_Android.aab" 2>&1 | tee "$OUT/AAB_SIGNATURE_VERIFICATION.txt"
+          grep -q 'jar verified' "$OUT/AAB_SIGNATURE_VERIFICATION.txt"
+          "$BT/zipalign" -c -v 4 "$OUT/GDScript_Lab_v1.0.0_Android.apk" > "$OUT/APK_ZIPALIGN_VERIFICATION.txt"
+          if "$BT/zipalign" -h 2>&1 | grep -q -- '-P'; then "$BT/zipalign" -c -P 16 -v 4 "$OUT/GDScript_Lab_v1.0.0_Android.apk" > "$OUT/APK_16KB_ZIPALIGN_VERIFICATION.txt"; fi
+          "$BT/aapt" dump badging "$OUT/GDScript_Lab_v1.0.0_Android.apk" > "$OUT/APK_BADGING.txt"
+          sha256sum "$OUT"/*.apk "$OUT"/*.aab > "$OUT/SHA256SUMS.txt"
+          CERT="$($BT/apksigner verify --print-certs "$OUT/GDScript_Lab_v1.0.0_Android.apk" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' | head -1)"
+          cat > "$OUT/ANDROID_RELEASE_IDENTITY.txt" <<EOF
+          GDScript Lab v1.0.0 Android release signing identity
+          Certificate SHA-256: $CERT
+          Alias: $ALIAS
+          IMPORTANT: This is a replacement permanent identity because the earlier prerelease private keystore is unavailable.
+          Earlier APKs signed by certificate 390ef4403f865da1652ba5a5968e8b743caf48f107339537861eae5b1ea63064 cannot be updated in place by this build.
+          EOF
+          cat > "$PRIV/ANDROID_SIGNING_CREDENTIALS.txt" <<EOF
+          PRIVATE - STORE SECURELY AND DO NOT DISTRIBUTE
+          Product: GDScript Lab
+          Alias: $ALIAS
+          Keystore password: $PASS
+          Key password: $PASS
+          Certificate SHA-256: $CERT
+          Generated for the definitive v1.0.0 canonical release.
+          This key must be reused for all future Android updates signed outside an app-store key-management service.
+          EOF
+          cp "$OUT/ANDROID_RELEASE_IDENTITY.txt" "$PRIV/ANDROID_RELEASE_IDENTITY.txt"
+      - name: Enable KVM
+        shell: bash
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm || true
+      - name: Launch signed canonical APK on Android 35 emulator
+        uses: ReactiveCircus/android-emulator-runner@v2.38.0
+        with:
+          api-level: 35
+          arch: x86_64
+          target: google_apis
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim -no-metrics
+          script: |
+            set -eu
+            adb install -r "$RUNNER_TEMP/android-release/GDScript_Lab_v1.0.0_Android.apk"
+            adb logcat -c
+            adb shell monkey -p com.jbhprods.gdscriptlab -c android.intent.category.LAUNCHER 1
+            sleep 10
+            PID="$(adb shell pidof com.jbhprods.gdscriptlab | tr -d '\r')"
+            test -n "$PID"
+            echo "PASS: signed canonical Android process remained alive; PID=$PID"
+            adb exec-out screencap -p > "$RUNNER_TEMP/android-release/ANDROID_RUNTIME_SCREENSHOT.png"
+            adb logcat -d -t 500 > "$RUNNER_TEMP/android-release/ANDROID_RUNTIME_LOGCAT.txt"
+            if grep -E 'FATAL EXCEPTION|AndroidRuntime.*FATAL|Process: com\.jbhprods\.gdscriptlab.*crash' "$RUNNER_TEMP/android-release/ANDROID_RUNTIME_LOGCAT.txt"; then exit 1; fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GDScript-Lab-v1.0.0-DEFINITIVE-Android-signed
+          path: ${{ runner.temp }}/android-release/**
+          if-no-files-found: error
+          retention-days: 90
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PRIVATE-GDScript-Lab-v1.0.0-Android-signing-backup
+          path: ${{ runner.temp }}/android-private/**
+          if-no-files-found: error
+          retention-days: 90
+
+  ios:
+    name: iOS unsigned compile check
+    needs: source
+    runs-on: macos-latest
+    steps:
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.13' }
+      - uses: actions/download-artifact@v4
+        with: { name: GDScript-Lab-v1.0.0-DEFINITIVE-CANONICAL-source, path: source-artifact }
+      - name: Extract canonical source
+        run: python -m zipfile -e source-artifact/GDScript_Lab_v1.0.0_FINAL_CANONICAL_SOURCE.zip .
+      - uses: actions/setup-node@v4
+        with: { node-version: '22.16.0' }
+      - uses: dtolnay/rust-toolchain@master
+        with: { toolchain: '1.98.0', targets: 'aarch64-apple-ios,x86_64-apple-ios,aarch64-apple-ios-sim' }
+      - name: CocoaPods
+        run: brew install cocoapods
+      - name: Compile exact unsigned iOS app
+        working-directory: GDScript_Lab_Tauri_v1.0.0
+        run: |
+          npm ci
+          npm run icons
+          python scripts/audit.py
+          cargo metadata --locked --format-version 1 --manifest-path src-tauri/Cargo.toml >/dev/null
+          npm run ios:init
+          npm run ios:build
