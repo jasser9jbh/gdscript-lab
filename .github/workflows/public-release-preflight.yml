@@ -1,0 +1,224 @@
+name: GDScript Lab v1.0.0 public release preflight
+
+on:
+  push:
+    branches: [release/public-preflight-20260902, main]
+    paths:
+      - '.github/workflows/public-release-preflight.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  SOURCE_ARCHIVE_TAG: v1.0.0-corrected-source-archive
+  SOURCE_ZIP: GDScript_Lab_v1.0.0_CORRECTED_NATIVE_SOURCE.zip
+  SOURCE_ZIP_SHA256: dc39f130eb650c08d5b8a3bea1b7a0ef392598fe98dd2af218734db24f2af4e4
+  PROJECT_DIR: GDScript_Lab_Tauri_v1.0.0
+  EXPECTED_FRONTEND_SHA256: 628151d40b067f8ab55da80030862720d319d07f69d62d5b532bfd0fdc311336
+  EXPECTED_PORTABLE_SHA256: e9961e8ed86526cff1a51725dd013c4370a159754642f3c6628779202095108d
+  EXPECTED_COURSE_SHA256: c0a663fb0cf5cf8876e3279e70d5783d245a615cbf6238cf82a1ad67e1408abe
+
+jobs:
+  preflight:
+    name: Security, reproducibility and third-party license gate
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prove durable draft-release source retrieval
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release view "$SOURCE_ARCHIVE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,tagName,assets > "$RUNNER_TEMP/SOURCE_RELEASE.json"
+          python - "$RUNNER_TEMP/SOURCE_RELEASE.json" <<'PY'
+          import json,sys
+          d=json.load(open(sys.argv[1]))
+          assert d['isDraft'] is True
+          assert d['tagName']=='v1.0.0-corrected-source-archive'
+          names={x['name'] for x in d.get('assets',[])}
+          assert 'GDScript_Lab_v1.0.0_CORRECTED_NATIVE_SOURCE.zip' in names
+          print('PASS: durable draft source release resolved by tag and contains the corrected source asset.')
+          PY
+          gh release download "$SOURCE_ARCHIVE_TAG" --repo "$GITHUB_REPOSITORY" --pattern "$SOURCE_ZIP"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Verify immutable source and first-party audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(sha256sum "$SOURCE_ZIP" | awk '{print $1}')" = "$SOURCE_ZIP_SHA256"
+          python -m zipfile -e "$SOURCE_ZIP" .
+          test "$(sha256sum "$PROJECT_DIR/src/index.html" | awk '{print $1}')" = "$EXPECTED_FRONTEND_SHA256"
+          test "$(sha256sum "$PROJECT_DIR/portable/GDScript_Lab_Godot47_v1.0.0.html" | awk '{print $1}')" = "$EXPECTED_PORTABLE_SHA256"
+          cd "$PROJECT_DIR"
+          python scripts/no_unicode_dashes_check.py
+          python scripts/audit.py | tee "$RUNNER_TEMP/SOURCE_AUDIT.txt"
+          grep -q "$EXPECTED_COURSE_SHA256" "$RUNNER_TEMP/SOURCE_AUDIT.txt"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.16.0'
+          cache: npm
+          cache-dependency-path: GDScript_Lab_Tauri_v1.0.0/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.98.0'
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './GDScript_Lab_Tauri_v1.0.0/src-tauri -> target'
+
+      - name: Resolve exactly locked dependency graph
+        working-directory: GDScript_Lab_Tauri_v1.0.0
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci
+          cargo metadata --locked --format-version 1 --manifest-path src-tauri/Cargo.toml > "$RUNNER_TEMP/CARGO_METADATA.json"
+          npm run tauri -- --version | tee "$RUNNER_TEMP/TAURI_CLI_VERSION.txt"
+          npm run tauri -- ios build --help > "$RUNNER_TEMP/TAURI_IOS_BUILD_HELP.txt"
+          grep -q -- '--export-method' "$RUNNER_TEMP/TAURI_IOS_BUILD_HELP.txt"
+          grep -q 'app-store-connect' "$RUNNER_TEMP/TAURI_IOS_BUILD_HELP.txt"
+
+      - name: npm advisory scan
+        working-directory: GDScript_Lab_Tauri_v1.0.0
+        shell: bash
+        run: |
+          set +e
+          npm audit --audit-level=moderate --json > "$RUNNER_TEMP/NPM_AUDIT.json"
+          CODE=$?
+          echo "NPM_AUDIT_EXIT=$CODE" >> "$GITHUB_ENV"
+          set -e
+          python - "$RUNNER_TEMP/NPM_AUDIT.json" <<'PY'
+          import json,sys
+          d=json.load(open(sys.argv[1]))
+          print('npm audit vulnerabilities:', d.get('metadata',{}).get('vulnerabilities',{}))
+          PY
+
+      - name: Install RustSec cargo-audit
+        shell: bash
+        run: cargo install --locked cargo-audit
+
+      - name: RustSec advisory scan
+        working-directory: GDScript_Lab_Tauri_v1.0.0
+        shell: bash
+        run: |
+          set +e
+          cargo audit --file src-tauri/Cargo.lock --json > "$RUNNER_TEMP/CARGO_AUDIT.json"
+          CODE=$?
+          echo "CARGO_AUDIT_EXIT=$CODE" >> "$GITHUB_ENV"
+          set -e
+          python - "$RUNNER_TEMP/CARGO_AUDIT.json" <<'PY'
+          import json,sys
+          d=json.load(open(sys.argv[1]))
+          vulns=d.get('vulnerabilities',{})
+          warnings=d.get('warnings',{})
+          print('RustSec vulnerabilities found:', vulns.get('found'))
+          print('RustSec warning categories:', sorted(warnings))
+          PY
+
+      - name: Install cargo-about
+        shell: bash
+        run: cargo install --locked --features cli cargo-about
+
+      - name: Generate complete Rust third-party license report
+        working-directory: GDScript_Lab_Tauri_v1.0.0/src-tauri
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > about.toml <<'EOF'
+          accepted = [
+            "0BSD",
+            "Apache-2.0",
+            "Apache-2.0 WITH LLVM-exception",
+            "BSD-3-Clause",
+            "CC0-1.0",
+            "ISC",
+            "LGPL-2.1-or-later",
+            "MIT",
+            "MIT-0",
+            "MPL-2.0",
+            "Unicode-3.0",
+            "Unlicense",
+            "Zlib",
+          ]
+          targets = [
+            "x86_64-unknown-linux-gnu",
+            "x86_64-pc-windows-msvc",
+            "aarch64-apple-darwin",
+            "aarch64-linux-android",
+            "aarch64-apple-ios",
+          ]
+          ignore-build-dependencies = false
+          ignore-dev-dependencies = true
+          ignore-transitive-dependencies = false
+          private = { ignore = true }
+          EOF
+          cat > about.hbs <<'EOF'
+          <!doctype html>
+          <html lang="en"><head><meta charset="utf-8"><title>GDScript Lab v1.0.0 Third-Party Licenses</title>
+          <style>body{font-family:system-ui,sans-serif;max-width:980px;margin:2rem auto;padding:0 1rem;line-height:1.45}pre{white-space:pre-wrap;border:1px solid #aaa;padding:1rem;overflow:auto}li{margin:.25rem 0}</style></head><body>
+          <h1>GDScript Lab v1.0.0 Third-Party Licenses</h1>
+          <p>Generated from the exact locked Rust dependency graph used by the release source.</p>
+          <h2>License overview</h2><ul>{{#each overview}}<li>{{name}} ({{count}})</li>{{/each}}</ul>
+          <h2>License texts and packages</h2>
+          {{#each licenses}}<section><h3>{{name}}</h3><p>Used by:</p><ul>{{#each used_by}}<li>{{crate.name}} {{crate.version}}{{#if crate.repository}} - {{crate.repository}}{{/if}}</li>{{/each}}</ul><pre>{{text}}</pre></section>{{/each}}
+          </body></html>
+          EOF
+          cargo about generate about.hbs > "$RUNNER_TEMP/THIRD_PARTY_LICENSES.html"
+          test -s "$RUNNER_TEMP/THIRD_PARTY_LICENSES.html"
+          grep -q 'GDScript Lab v1.0.0 Third-Party Licenses' "$RUNNER_TEMP/THIRD_PARTY_LICENSES.html"
+
+      - name: Write pre-publication report
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/PUBLIC_RELEASE_PREFLIGHT.txt" <<EOF
+          GDScript Lab v1.0.0 public release preflight
+          Source ZIP SHA-256: ${SOURCE_ZIP_SHA256}
+          Frontend SHA-256: ${EXPECTED_FRONTEND_SHA256}
+          Portable SHA-256: ${EXPECTED_PORTABLE_SHA256}
+          COURSE_DATA SHA-256: ${EXPECTED_COURSE_SHA256}
+          Durable draft source retrieval: PASS
+          First-party source audit: PASS
+          Locked npm install: PASS
+          Locked Cargo metadata: PASS
+          Tauri iOS app-store-connect CLI surface: PASS
+          npm audit moderate-or-higher gate exit: ${NPM_AUDIT_EXIT}
+          RustSec cargo-audit gate exit: ${CARGO_AUDIT_EXIT}
+          Full cargo-about third-party license report: GENERATED
+          EOF
+
+      - name: Upload preflight evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: GDScript-Lab-v1.0.0-PUBLIC-RELEASE-PREFLIGHT
+          if-no-files-found: error
+          retention-days: 90
+          path: |
+            ${{ runner.temp }}/SOURCE_RELEASE.json
+            ${{ runner.temp }}/SOURCE_AUDIT.txt
+            ${{ runner.temp }}/CARGO_METADATA.json
+            ${{ runner.temp }}/TAURI_CLI_VERSION.txt
+            ${{ runner.temp }}/TAURI_IOS_BUILD_HELP.txt
+            ${{ runner.temp }}/NPM_AUDIT.json
+            ${{ runner.temp }}/CARGO_AUDIT.json
+            ${{ runner.temp }}/THIRD_PARTY_LICENSES.html
+            ${{ runner.temp }}/PUBLIC_RELEASE_PREFLIGHT.txt
+
+      - name: Enforce security gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${NPM_AUDIT_EXIT:-99}" = '0'
+          test "${CARGO_AUDIT_EXIT:-99}" = '0'
+          echo 'PASS: no npm vulnerability at moderate-or-higher severity and no RustSec vulnerability blocked the release preflight.'
