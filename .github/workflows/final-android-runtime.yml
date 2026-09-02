@@ -1,7 +1,8 @@
-name: Final Android runtime validation
+name: Final Android canonical unsigned runtime validation
 
 on:
   push:
+    branches: [uiux-native-final-run-20260902]
     paths:
       - '.github/workflows/final-android-runtime.yml'
   workflow_dispatch:
@@ -12,44 +13,107 @@ permissions:
 
 jobs:
   android-runtime:
-    name: Exact final APK emulator launch
+    name: Canonical Android unsigned build + deterministic emulator launch
     runs-on: ubuntu-22.04
+    env:
+      CANONICAL_SOURCE_ARTIFACT_ID: '9831338397'
+      PROJECT_DIR: GDScript_Lab_Tauri_v1.0.0
+      EXPECTED_PORTABLE_SHA256: 3e36ecee887e85272648fc7658bbd32b22110d659778acae9adccde979c2033f
+      EXPECTED_FRONTEND_SHA256: ba6d7357575002a0ee129b26733f52e9c29d5e64a470e3bf84bd76ca8d306e99
     steps:
-      - uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: '17'
-      - uses: android-actions/setup-android@v4
-      - name: Install Android signing tools
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.13' }
+      - uses: actions/setup-node@v4
+        with: { node-version: '22.16.0' }
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: '17' }
+      - uses: android-actions/setup-android@v3
+      - name: Install Android SDK and NDK
         shell: bash
         run: |
           set -euo pipefail
-          sdkmanager 'platform-tools' 'build-tools;36.0.0'
-      - name: Download exact final Android build artifact
-        uses: actions/download-artifact@v4
+          sdkmanager 'platform-tools' 'platforms;android-36' 'build-tools;36.0.0' 'ndk;27.2.12479018'
+          echo "NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@master
         with:
-          name: GDScript-Lab-v1.0.0-FINAL-Android-Unsigned
-          path: final-android
-          repository: jasser9jbh/gdscript-lab
-          run-id: 33553834065
-          github-token: ${{ github.token }}
-      - name: Prepare exact APK for emulator installation
+          toolchain: '1.98.0'
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+      - uses: swatinem/rust-cache@v2
+        with: { workspaces: './GDScript_Lab_Tauri_v1.0.0/src-tauri -> target' }
+
+      - name: Download exact locked canonical source
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${CANONICAL_SOURCE_ARTIFACT_ID}/zip" \
+            -o canonical-source-artifact.zip
+          python -m zipfile -e canonical-source-artifact.zip canonical-wrapper
+          test -f canonical-wrapper/GDScript_Lab_v1.0.0_FINAL_CANONICAL_SOURCE.zip
+          python -m zipfile -e canonical-wrapper/GDScript_Lab_v1.0.0_FINAL_CANONICAL_SOURCE.zip .
+          test -s "$PROJECT_DIR/package-lock.json"
+          test -s "$PROJECT_DIR/src-tauri/Cargo.lock"
+          test "$(sha256sum "$PROJECT_DIR/portable/GDScript_Lab_Godot47_v1.0.0.html" | awk '{print $1}')" = "$EXPECTED_PORTABLE_SHA256"
+          test "$(sha256sum "$PROJECT_DIR/src/index.html" | awk '{print $1}')" = "$EXPECTED_FRONTEND_SHA256"
+
+      - name: Build exact canonical APK and AAB
+        working-directory: ${{ env.PROJECT_DIR }}
         shell: bash
         run: |
           set -euo pipefail
-          APK="$(find final-android -type f -name '*.apk' -print -quit)"
-          test -n "$APK"
-          keytool -genkeypair -v -keystore "$RUNNER_TEMP/emulator-only.jks" -storepass emulatoronly -keypass emulatoronly -alias emulatoronly -keyalg RSA -keysize 2048 -validity 2 -dname 'CN=CI Emulator Only,O=Temporary QA' >/dev/null 2>&1
-          "$ANDROID_HOME/build-tools/36.0.0/zipalign" -f 4 "$APK" "$RUNNER_TEMP/final-aligned.apk"
-          "$ANDROID_HOME/build-tools/36.0.0/apksigner" sign --ks "$RUNNER_TEMP/emulator-only.jks" --ks-key-alias emulatoronly --ks-pass pass:emulatoronly --key-pass pass:emulatoronly --out "$RUNNER_TEMP/final-emulator.apk" "$RUNNER_TEMP/final-aligned.apk"
-          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose "$RUNNER_TEMP/final-emulator.apk"
+          npm ci
+          npm run icons
+          python scripts/audit.py
+          cargo metadata --locked --format-version 1 --manifest-path src-tauri/Cargo.toml >/dev/null
+          npm run android:init
+          npm run android:apk
+          npm run android:aab
+          OUT="$RUNNER_TEMP/android-unsigned"; mkdir -p "$OUT"
+          APK="$(find src-tauri/gen/android/app/build/outputs -type f -name '*release-unsigned.apk' -print -quit)"
+          AAB="$(find src-tauri/gen/android/app/build/outputs -type f -name '*.aab' -print -quit)"
+          test -n "$APK"; test -n "$AAB"
+          cp "$APK" "$OUT/GDScript_Lab_v1.0.0_Android_UNSIGNED.apk"
+          cp "$AAB" "$OUT/GDScript_Lab_v1.0.0_Android_UNSIGNED.aab"
+          "$ANDROID_HOME/build-tools/36.0.0/aapt" dump badging "$APK" > "$OUT/APK_BADGING.txt"
+          sha256sum "$OUT"/*.apk "$OUT"/*.aab > "$OUT/SHA256SUMS.txt"
+
+      - name: Upload canonical unsigned outputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: GDScript-Lab-v1.0.0-DEFINITIVE-Android-Unsigned
+          if-no-files-found: error
+          retention-days: 90
+          path: ${{ runner.temp }}/android-unsigned/**
+
+      - name: Prepare temporary emulator-only signing
+        shell: bash
+        run: |
+          set -euo pipefail
+          BT="$ANDROID_HOME/build-tools/36.0.0"
+          APK="$RUNNER_TEMP/android-unsigned/GDScript_Lab_v1.0.0_Android_UNSIGNED.apk"
+          keytool -genkeypair -keystore "$RUNNER_TEMP/emulator-only.jks" \
+            -storepass emulatoronly -keypass emulatoronly -alias emulatoronly \
+            -keyalg RSA -keysize 2048 -validity 2 -dname 'CN=CI Emulator Only,O=Temporary QA' >/dev/null 2>&1
+          "$BT/zipalign" -f -p 4 "$APK" "$RUNNER_TEMP/emulator-aligned.apk"
+          "$BT/apksigner" sign --ks "$RUNNER_TEMP/emulator-only.jks" --ks-key-alias emulatoronly \
+            --ks-pass pass:emulatoronly --key-pass pass:emulatoronly \
+            --out "$RUNNER_TEMP/emulator-only.apk" "$RUNNER_TEMP/emulator-aligned.apk"
+          "$BT/apksigner" verify --verbose "$RUNNER_TEMP/emulator-only.apk"
+
       - name: Enable KVM
         shell: bash
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm || true
-      - name: Install and launch exact final APK on Android 35 emulator
+
+      - name: Launch canonical APK on Android 35 emulator
         uses: ReactiveCircus/android-emulator-runner@v2.38.0
         with:
           api-level: 35
@@ -58,28 +122,42 @@ jobs:
           disable-animations: true
           emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim -no-metrics
           script: |
-            set -eu
-            adb install -r "$RUNNER_TEMP/final-emulator.apk"
+            set -euo pipefail
+            EVIDENCE="$RUNNER_TEMP/android-runtime-evidence"; mkdir -p "$EVIDENCE"
+            APK="$RUNNER_TEMP/emulator-only.apk"
+            AAPT="$ANDROID_HOME/build-tools/36.0.0/aapt"
+            PACKAGE="$($AAPT dump badging "$APK" | sed -n "s/^package: name='\([^']*\)'.*/\1/p" | head -1)"
+            ACTIVITY="$($AAPT dump badging "$APK" | sed -n "s/^launchable-activity: name='\([^']*\)'.*/\1/p" | head -1)"
+            test -n "$PACKAGE"
+            printf 'package=%s\nactivity=%s\n' "$PACKAGE" "$ACTIVITY" | tee "$EVIDENCE/ANDROID_LAUNCH_TARGET.txt"
+            adb wait-for-device
+            adb install -r "$APK" | tee "$EVIDENCE/ADB_INSTALL.txt"
             adb logcat -c
-            adb shell monkey -p com.jbhprods.gdscriptlab -c android.intent.category.LAUNCHER 1
-            sleep 10
-            PID="$(adb shell pidof com.jbhprods.gdscriptlab | tr -d '\r')"
+            if [ -n "$ACTIVITY" ]; then
+              adb shell am start -W -n "$PACKAGE/$ACTIVITY" | tee "$EVIDENCE/ADB_START.txt"
+            else
+              adb shell monkey -p "$PACKAGE" -c android.intent.category.LAUNCHER 1 | tee "$EVIDENCE/ADB_START.txt"
+            fi
+            sleep 15
+            PID="$(adb shell pidof "$PACKAGE" | tr -d '\r\n')"
+            printf '%s\n' "$PID" | tee "$EVIDENCE/PID.txt"
+            adb shell dumpsys package "$PACKAGE" > "$EVIDENCE/DUMPSYS_PACKAGE.txt" || true
+            adb shell dumpsys activity activities > "$EVIDENCE/DUMPSYS_ACTIVITIES.txt" || true
+            adb shell dumpsys activity exit-info "$PACKAGE" > "$EVIDENCE/EXIT_INFO.txt" || true
+            adb logcat -d -t 1200 > "$EVIDENCE/ANDROID_RUNTIME_LOGCAT.txt" || true
+            adb exec-out screencap -p > "$EVIDENCE/ANDROID_RUNTIME_SCREENSHOT.png" || true
             test -n "$PID"
-            echo "PASS: exact final Android app process remained alive; PID=$PID"
-            adb shell dumpsys package com.jbhprods.gdscriptlab | grep -E 'versionName=|versionCode=' | head -n 4
-            adb shell dumpsys activity activities | grep -m1 -E 'mResumedActivity|topResumedActivity' || true
-            adb exec-out screencap -p > final-android-runtime.png
-            adb logcat -d -t 500 > final-android-logcat.txt
-            if grep -E 'FATAL EXCEPTION|AndroidRuntime.*FATAL|Process: com\.jbhprods\.gdscriptlab.*crash' final-android-logcat.txt; then
-              echo 'Fatal app crash detected in logcat'
+            if grep -E "Process: ${PACKAGE}.*|FATAL EXCEPTION" "$EVIDENCE/ANDROID_RUNTIME_LOGCAT.txt" | grep -q "$PACKAGE"; then
+              echo "Package-specific fatal runtime signature detected" >&2
               exit 1
             fi
+            echo "PASS: canonical Android process remained alive; package=$PACKAGE pid=$PID" | tee "$EVIDENCE/RESULT.txt"
+
       - name: Upload runtime evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: GDScript-Lab-v1.0.0-FINAL-Android-Runtime-Evidence
+          name: GDScript-Lab-v1.0.0-DEFINITIVE-Android-Runtime-Evidence
           if-no-files-found: warn
-          path: |
-            final-android-runtime.png
-            final-android-logcat.txt
+          retention-days: 90
+          path: ${{ runner.temp }}/android-runtime-evidence/**

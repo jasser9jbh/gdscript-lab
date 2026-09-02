@@ -1,41 +1,32 @@
 # GDScript Lab v1.0.0 — Tauri 2 Application
 
-Production application source for **GDScript Lab**, using the frozen validated HTML as the authoritative educational payload.
+Production application source and release engineering for **GDScript Lab**.
 
 - Product: GDScript Lab
 - Publisher: Journey Beyond Horizons Productions (JBH PRODS)
 - Bundle ID: `com.jbhprods.gdscriptlab`
 - Version: `1.0.0`
-- Frozen portable-source SHA-256: `743e2f2d038681473ee20989892f6a306f758b4d03ff4e9989826e082daab822`
-- COURSE_DATA SHA-256: `569bc1d6e94096f495345274bc5083053e1d5fd9af4262d4549cb08cde6b5880`
+- Corrected frontend SHA-256: `628151d40b067f8ab55da80030862720d319d07f69d62d5b532bfd0fdc311336`
+- Corrected portable HTML SHA-256: `e9961e8ed86526cff1a51725dd013c4370a159754642f3c6628779202095108d`
+- COURSE_DATA SHA-256: `c0a663fb0cf5cf8876e3279e70d5783d245a615cbf6238cf82a1ad67e1408abe`
+- Inventory: 27 modules / 171 lessons / 183 code-command blocks / 310 glossary entries / 143 references / 10 projects
 
-## What is preserved
+## Current release source
 
-`portable/GDScript_Lab_Godot47_v1.0.0.html` is byte-for-byte identical to the frozen browser build. `src/index.html` keeps the complete embedded `COURSE_DATA` object byte-for-byte identical. All 183 learner-visible code/command blocks are unchanged.
+The corrected source artifact is the canonical source used for the final native matrix. `src/index.html` and `portable/GDScript_Lab_Godot47_v1.0.0.html` contain byte-identical serialized `COURSE_DATA` at the hash above. The UI maintenance revision embeds the Dreamcatcher SVG, synchronizes light/dark scrollbar chrome, and hardens backup/restore confirmation and validation without changing the curriculum inventory.
 
-## Native-shell adaptations
+## Native shell
 
 - Tauri 2 WebView shell for Windows, Linux, macOS, Android and iOS.
-- User-initiated official Godot/JBH PRODS links open in the system browser through the Tauri opener plugin.
+- Official Godot/JBH PRODS links open through the Tauri opener plugin.
 - Exports use a native Save dialog and native filesystem text write in packaged apps.
-- The original browser Blob-download behavior remains only in the portable/non-Tauri edition.
-- Local progress remains local WebView storage; no account, telemetry, analytics, ad network, updater, or automatic HTTP client is added.
-- Safe-area handling is included for mobile notches/system bars.
-- Portable HTML remains included for users who prefer the standalone browser edition.
+- Browser Blob download remains only in the portable/non-Tauri edition.
+- Local progress remains local; no account, telemetry, analytics, ad network, updater or automatic HTTP client is added.
+- Mobile safe-area handling is included.
 
-## Native security model
+## Security model
 
-The Tauri frontend permits Tauri's internal IPC endpoint in its CSP but does not grant arbitrary remote fetch access. Capabilities are limited to:
-
-- Tauri core defaults needed by the application shell;
-- Save dialog only;
-- text-file writes to user-selected locations;
-- system-browser opening only for:
-  - `docs.godotengine.org`
-  - `godotengine.org`
-  - `jbhprods.com`
-
-No shell plugin, HTTP plugin, updater, broad filesystem read permission or telemetry capability is included.
+Capabilities are intentionally narrow: Save dialog, text-file writes to user-selected locations, and system-browser opening for `docs.godotengine.org`, `godotengine.org`, and `jbhprods.com`. No shell plugin, HTTP plugin, updater, broad filesystem-read capability or telemetry is included.
 
 ## Pinned release toolchain
 
@@ -43,37 +34,47 @@ No shell plugin, HTTP plugin, updater, broad filesystem read permission or telem
 - Rust 1.98.0
 - Tauri crate 2.11.5
 - Tauri CLI 2.11.4
+- tauri-build 2.6.3
+- tauri-plugin-fs 2.5.2
 
-## v1.0.0 native validation
+## Native validation evidence
 
-GitHub Actions run `33530186802` passed the immutable source audit and completed successfully for:
+Corrected-source native CI has demonstrated:
 
-- Windows x64: NSIS + MSI
-- Linux x64: AppImage + DEB
-- macOS Apple Silicon: APP + DMG
-- macOS Intel: APP + DMG
-- Android: APK + AAB
-- iOS: unsigned native compile check
+- Windows x64: NSIS + MSI build and GUI smoke PASS
+- Linux x64: AppImage + DEB build and GUI smoke PASS
+- macOS Apple Silicon: DMG build
+- macOS Intel: DMG build
+- Android: APK + AAB compilation reaches completion; production signing is handled separately
+- iOS: unsigned native compile PASS; a distributable IPA still requires Apple signing/provisioning
 
-The two dependency compatibility corrections proven by that matrix are `tauri-build = 2.6.3` and `tauri-plugin-fs = 2.5.2`. A definitive corrected source archive was subsequently generated with those pins and a resolved `Cargo.lock`; its SHA-256 is `13dbe46398d771782b335287ec73b758ead357b0971a103690553130ab868a2d`.
+## Android release identity — production rule
 
-The Linux AppImage also passed a GUI smoke-launch test under Xvfb.
+A public Android release must use **one persistent owner-controlled signing identity** for v1.0.0 and future direct-distribution updates. CI must never generate a replacement key per run and must never upload a private keystore as a release artifact.
 
-### Android release identity
+The production-safe Android workflow is `.github/workflows/final-android-production-v5-windows.yml`. It consumes these GitHub Actions secrets when configured:
 
-The v1.0.0 Android direct-distribution APK is signed and verifies with APK Signature Scheme v2 and v3. The signed AAB also verifies. The permanent release certificate SHA-256 is:
+- `ANDROID_KEYSTORE_BASE64`
+- `ANDROID_KEY_ALIAS`
+- `ANDROID_KEY_PASSWORD`
+- `ANDROID_STORE_PASSWORD`
 
-`39:0E:F4:40:9A:8B:6B:B7:DD:99:E1:CE:7E:14:EB:57:A4:6B:60:AA:55:71:01:B2:FF:D4:F1:FB:B7:A6:30:64`
+When all four are present, APK/AAB are signed and verified. When they are absent, the workflow emits explicitly named `UNSIGNED` outputs rather than pretending the artifacts are production-signed. The private keystore is never uploaded by the workflow.
 
-**The private Android keystore and passwords are intentionally not stored in this repository.** Keep the separate private signing backup secure and offline.
+## Platform signing reality
+
+- Android direct distribution: persistent signing key required for upgrade continuity.
+- macOS public distribution: Developer ID signing/notarization is recommended and normally required for a polished Gatekeeper experience.
+- iOS public installation: Apple signing/provisioning is required.
+- Windows: unsigned installers can function, but Authenticode signing is recommended to reduce reputation/SmartScreen warnings.
 
 ## Validation
 
-Run:
+Inside the corrected source package, run:
 
 ```bash
 python scripts/check-build-env.py
 python scripts/audit.py
 ```
 
-See the source package documentation for build, distribution, release-checklist, and third-party-notice details.
+Release bundles must include regenerated relative-path SHA-256 checksums and must never include private signing keys or passwords.

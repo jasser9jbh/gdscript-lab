@@ -1,0 +1,236 @@
+name: GDScript Lab final UI release matrix
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/ui-maintenance-rebuild-v3.yml'
+      - '.github/scripts/prepare-final-source.sh'
+      - '.github/final-transform-chunks/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gdlab-definitive-hardened-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  SOURCE_ZIP: GDScript_Lab_v1.0.0_Tauri_Production_Project_FINAL.zip
+  SOURCE_GIT_BLOB_SHA1: 43d91956291718bef62f80fb83384316f8e083e9
+  PROJECT_DIR: _incoming/GDScript_Lab_Tauri_v1.0.0
+  NODE_VERSION: '22.16.0'
+  PYTHON_VERSION: '3.13'
+  RUST_VERSION: '1.98.0'
+
+jobs:
+  source:
+    name: Audit exact hardened source
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.13' }
+      - uses: actions/setup-node@v4
+        with: { node-version: '22.16.0' }
+      - name: Prepare and verify
+        shell: bash
+        run: |
+          bash .github/scripts/prepare-final-source.sh
+          cd "$PROJECT_DIR"
+          test "$(sha256sum portable/GDScript_Lab_Godot47_v1.0.0.html | awk '{print $1}')" = '3e36ecee887e85272648fc7658bbd32b22110d659778acae9adccde979c2033f'
+          test "$(sha256sum src/index.html | awk '{print $1}')" = 'ba6d7357575002a0ee129b26733f52e9c29d5e64a470e3bf84bd76ca8d306e99'
+          grep -q 'data:image/svg+xml;base64,' src/index.html
+          grep -q 'Backup & restore' src/index.html
+          grep -q 'Restore from backup' src/index.html
+          grep -q 'html\[data-theme="light"\]' src/index.html
+          python - <<'PY'
+          from pathlib import Path
+          import re,subprocess,tempfile
+          for rel in ['portable/GDScript_Lab_Godot47_v1.0.0.html','release/GDScript_Lab_v1.0.0_Portable.html','src/index.html']:
+              text=Path(rel).read_text(encoding='utf-8')
+              for i,code in enumerate(re.findall(r'<script(?:\s[^>]*)?>(.*?)</script>',text,re.S|re.I)):
+                  p=Path(tempfile.gettempdir())/f'gdlab-{Path(rel).name}-{i}.js'; p.write_text(code,encoding='utf-8'); subprocess.run(['node','--check',str(p)],check=True)
+          print('Exact hardened frontend validation PASS')
+          PY
+      - name: Package audited source
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import os,zipfile
+          root=Path(os.environ['PROJECT_DIR']); out=Path(os.environ['RUNNER_TEMP'])/'GDScript_Lab_v1.0.0_FINAL_HARDENED_SOURCE.zip'
+          with zipfile.ZipFile(out,'w',zipfile.ZIP_DEFLATED,compresslevel=9) as z:
+              for p in sorted(root.rglob('*')):
+                  if p.is_file(): z.write(p,p.relative_to(root.parent))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GDScript-Lab-v1.0.0-FINAL-HARDENED-source
+          path: ${{ runner.temp }}/GDScript_Lab_v1.0.0_FINAL_HARDENED_SOURCE.zip
+          if-no-files-found: error
+          retention-days: 7
+
+  desktop:
+    name: ${{ matrix.name }}
+    needs: source
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: 'Linux x64 AppImage + DEB', os: ubuntu-22.04, target: '', bundles: 'appimage,deb', artifact: 'GDScript-Lab-v1.0.0-FINAL-Linux-x64' }
+          - { name: 'Windows x64 NSIS + MSI', os: windows-latest, target: '', bundles: 'nsis,msi', artifact: 'GDScript-Lab-v1.0.0-FINAL-Windows-x64' }
+          - { name: 'macOS Apple Silicon APP + DMG', os: macos-latest, target: 'aarch64-apple-darwin', bundles: 'app,dmg', artifact: 'GDScript-Lab-v1.0.0-FINAL-macOS-arm64' }
+          - { name: 'macOS Intel APP + DMG', os: macos-latest, target: 'x86_64-apple-darwin', bundles: 'app,dmg', artifact: 'GDScript-Lab-v1.0.0-FINAL-macOS-x64' }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.13' }
+      - uses: actions/download-artifact@v4
+        with: { name: 'GDScript-Lab-v1.0.0-FINAL-HARDENED-source', path: source-artifact }
+      - name: Extract audited source
+        shell: bash
+        run: python -m zipfile -e source-artifact/GDScript_Lab_v1.0.0_FINAL_HARDENED_SOURCE.zip .
+      - name: Linux prerequisites
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf xdg-utils xvfb
+      - uses: actions/setup-node@v4
+        with: { node-version: '22.16.0' }
+      - uses: dtolnay/rust-toolchain@master
+        with: { toolchain: '1.98.0' }
+      - name: Add target
+        if: matrix.target != ''
+        shell: bash
+        run: rustup target add '${{ matrix.target }}'
+      - uses: swatinem/rust-cache@v2
+        with: { workspaces: './GDScript_Lab_Tauri_v1.0.0/src-tauri -> target' }
+      - name: Build exact native bundles
+        working-directory: GDScript_Lab_Tauri_v1.0.0
+        shell: bash
+        run: |
+          npm ci
+          npm run icons
+          cargo metadata --locked --format-version 1 --manifest-path src-tauri/Cargo.toml > /dev/null
+          if [ -n '${{ matrix.target }}' ]; then npm run tauri -- build --target '${{ matrix.target }}' --bundles '${{ matrix.bundles }}'; else npm run tauri -- build --bundles '${{ matrix.bundles }}'; fi
+      - name: Linux GUI smoke
+        if: runner.os == 'Linux'
+        working-directory: GDScript_Lab_Tauri_v1.0.0
+        shell: bash
+        run: |
+          APP="$(find src-tauri/target -type f -name '*.AppImage' -print -quit)"; test -n "$APP"; chmod +x "$APP"
+          set +e; xvfb-run -a env APPIMAGE_EXTRACT_AND_RUN=1 "$APP" > "$RUNNER_TEMP/smoke.log" 2>&1 & PID=$!; sleep 10
+          if kill -0 "$PID" 2>/dev/null; then kill "$PID" || true; wait "$PID" || true; echo PASS; exit 0; fi
+          wait "$PID"; C=$?; cat "$RUNNER_TEMP/smoke.log" || true; exit "$C"
+      - name: Windows GUI smoke
+        if: runner.os == 'Windows'
+        working-directory: GDScript_Lab_Tauri_v1.0.0
+        shell: pwsh
+        run: |
+          $exe=Get-ChildItem src-tauri/target -Recurse -Filter '*.exe' | Where-Object { $_.FullName -match '\\release\\gdscript-lab\.exe$' } | Select-Object -First 1
+          if (-not $exe) { throw 'Application executable not found' }
+          $p=Start-Process $exe.FullName -PassThru; Start-Sleep 10
+          if ($p.HasExited) { throw "Exited with $($p.ExitCode)" }
+          Stop-Process $p.Id -Force
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          if-no-files-found: error
+          retention-days: 7
+          path: |
+            GDScript_Lab_Tauri_v1.0.0/src-tauri/target/**/bundle/**/*.AppImage
+            GDScript_Lab_Tauri_v1.0.0/src-tauri/target/**/bundle/**/*.deb
+            GDScript_Lab_Tauri_v1.0.0/src-tauri/target/**/bundle/**/*.exe
+            GDScript_Lab_Tauri_v1.0.0/src-tauri/target/**/bundle/**/*.msi
+            GDScript_Lab_Tauri_v1.0.0/src-tauri/target/**/bundle/**/*.dmg
+
+  android:
+    name: Android signed APK + AAB
+    needs: source
+    runs-on: ubuntu-22.04
+    env:
+      ANDROID_KEY_BASE64: ${{ secrets.ANDROID_KEY_BASE64 }}
+      ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+      ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+      ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+    steps:
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.13' }
+      - uses: actions/download-artifact@v4
+        with: { name: 'GDScript-Lab-v1.0.0-FINAL-HARDENED-source', path: source-artifact }
+      - name: Extract audited source
+        run: python -m zipfile -e source-artifact/GDScript_Lab_v1.0.0_FINAL_HARDENED_SOURCE.zip .
+      - uses: actions/setup-node@v4
+        with: { node-version: '22.16.0' }
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: '17' }
+      - uses: android-actions/setup-android@v3
+      - name: SDK and NDK
+        run: |
+          sdkmanager 'platforms;android-36' 'build-tools;36.0.0' 'ndk;27.2.12479018'
+          echo "NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@master
+        with: { toolchain: '1.98.0', targets: 'aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android' }
+      - uses: swatinem/rust-cache@v2
+        with: { workspaces: './GDScript_Lab_Tauri_v1.0.0/src-tauri -> target' }
+      - name: Require signing identity
+        run: test -n "$ANDROID_KEY_BASE64" && test -n "$ANDROID_KEY_ALIAS" && test -n "$ANDROID_KEYSTORE_PASSWORD" && test -n "$ANDROID_KEY_PASSWORD"
+      - name: Build Android
+        working-directory: GDScript_Lab_Tauri_v1.0.0
+        run: |
+          npm ci
+          npm run icons
+          cargo metadata --locked --format-version 1 --manifest-path src-tauri/Cargo.toml > /dev/null
+          npm run android:init
+          npm run android:apk
+          npm run android:aab
+      - name: Sign and verify
+        working-directory: GDScript_Lab_Tauri_v1.0.0
+        shell: bash
+        run: |
+          set -euo pipefail
+          BT="$ANDROID_HOME/build-tools/36.0.0"; KS="$RUNNER_TEMP/key.jks"; OUT="$RUNNER_TEMP/android-final"; mkdir -p "$OUT"
+          echo "$ANDROID_KEY_BASE64" | base64 --decode > "$KS"
+          U="$(find src-tauri/gen/android/app/build/outputs -type f -name '*release-unsigned.apk' -print -quit)"; A="$(find src-tauri/gen/android/app/build/outputs -type f -name '*.aab' -print -quit)"; test -n "$U"; test -n "$A"
+          "$BT/zipalign" -f -p 4 "$U" "$OUT/aligned.apk"
+          "$BT/apksigner" sign --ks "$KS" --ks-key-alias "$ANDROID_KEY_ALIAS" --ks-pass "pass:$ANDROID_KEYSTORE_PASSWORD" --key-pass "pass:$ANDROID_KEY_PASSWORD" --out "$OUT/GDScript_Lab_v1.0.0_Android.apk" "$OUT/aligned.apk"
+          cp "$A" "$OUT/GDScript_Lab_v1.0.0_Android.aab"
+          jarsigner -keystore "$KS" -storepass "$ANDROID_KEYSTORE_PASSWORD" -keypass "$ANDROID_KEY_PASSWORD" -sigalg SHA256withRSA -digestalg SHA-256 "$OUT/GDScript_Lab_v1.0.0_Android.aab" "$ANDROID_KEY_ALIAS"
+          "$BT/apksigner" verify --verbose --print-certs "$OUT/GDScript_Lab_v1.0.0_Android.apk" | tee "$OUT/APK_SIGNATURE_VERIFICATION.txt"
+          jarsigner -verify -verbose -certs "$OUT/GDScript_Lab_v1.0.0_Android.aab" 2>&1 | tee "$OUT/AAB_SIGNATURE_VERIFICATION.txt"
+          grep -q 'jar verified' "$OUT/AAB_SIGNATURE_VERIFICATION.txt"
+          "$BT/zipalign" -c -v 4 "$OUT/GDScript_Lab_v1.0.0_Android.apk" > "$OUT/APK_ZIPALIGN_VERIFICATION.txt"
+          if "$BT/zipalign" -h 2>&1 | grep -q -- '-P'; then "$BT/zipalign" -c -P 16 -v 4 "$OUT/GDScript_Lab_v1.0.0_Android.apk" > "$OUT/APK_16KB_ZIPALIGN_VERIFICATION.txt"; fi
+          "$BT/aapt" dump badging "$OUT/GDScript_Lab_v1.0.0_Android.apk" > "$OUT/APK_BADGING.txt"
+          sha256sum "$OUT"/*.apk "$OUT"/*.aab > "$OUT/SHA256SUMS.txt"
+          rm -f "$OUT/aligned.apk"
+      - uses: actions/upload-artifact@v4
+        with: { name: 'GDScript-Lab-v1.0.0-FINAL-Android-signed', path: '${{ runner.temp }}/android-final/**', if-no-files-found: error, retention-days: 7 }
+
+  ios:
+    name: iOS unsigned compile check
+    needs: source
+    runs-on: macos-latest
+    steps:
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.13' }
+      - uses: actions/download-artifact@v4
+        with: { name: 'GDScript-Lab-v1.0.0-FINAL-HARDENED-source', path: source-artifact }
+      - name: Extract audited source
+        run: python -m zipfile -e source-artifact/GDScript_Lab_v1.0.0_FINAL_HARDENED_SOURCE.zip .
+      - uses: actions/setup-node@v4
+        with: { node-version: '22.16.0' }
+      - uses: dtolnay/rust-toolchain@master
+        with: { toolchain: '1.98.0', targets: 'aarch64-apple-ios,x86_64-apple-ios,aarch64-apple-ios-sim' }
+      - name: CocoaPods
+        run: brew install cocoapods
+      - name: Compile unsigned iOS
+        working-directory: GDScript_Lab_Tauri_v1.0.0
+        run: |
+          npm ci
+          npm run icons
+          cargo metadata --locked --format-version 1 --manifest-path src-tauri/Cargo.toml > /dev/null
+          npm run ios:init
+          npm run ios:build
