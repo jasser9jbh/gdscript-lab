@@ -1,75 +1,111 @@
 # GDScript Lab v1.0.0 — Production Signing Handoff
 
-This document covers only the remaining credential-dependent release work. Application functionality and unsigned/native build validation are tracked separately in `RELEASE_STATUS.md`.
+This document covers only the remaining publisher-credential work. Application functionality and unsigned/native validation are tracked in `RELEASE_STATUS.md`. The final credential-gated automation is `.github/workflows/final-signed-release.yml`.
 
-## Android
+## 1. Android — permanent publisher identity
 
-Use one permanent publisher-owned Android signing identity for v1.0.0 and all future updates distributed under the same package identity `com.jbhprods.gdscriptlab`.
+Package identity: `com.jbhprods.gdscriptlab`.
 
-Required GitHub Actions secrets:
+Use exactly one permanent publisher-owned release keystore for v1.0.0 and every future update distributed under this package identity. Do **not** generate a different release key on each CI run.
 
-- `ANDROID_KEYSTORE_BASE64` — base64 encoding of the publisher-owned `.jks`/keystore file
-- `ANDROID_KEY_ALIAS` — alias of the release key in that keystore
+GitHub Actions secrets:
+
+- `ANDROID_KEYSTORE_BASE64` — base64 encoding of the publisher-owned `.jks`/keystore
+- `ANDROID_KEY_ALIAS` — release-key alias
 - `ANDROID_STORE_PASSWORD` — keystore password
-- `ANDROID_KEY_PASSWORD` — key password
+- `ANDROID_KEY_PASSWORD` — release-key password
 
-Production workflow:
+Final CI acceptance gates:
 
-`.github/workflows/final-android-production-v5-windows.yml`
+1. API 36 package metadata and version `1.0.0`.
+2. 16 KB APK ZIP alignment.
+3. 16 KB ELF alignment for APK/AAB native libraries.
+4. `apksigner verify` passes for the final APK.
+5. `jarsigner -verify` passes for the final AAB.
+6. The signed APK installs and remains alive on the Android 15 16 KB emulator.
+7. The signer certificate SHA-256 is recorded as public release identity evidence.
+8. The private keystore/passwords are never uploaded as artifacts.
 
-Acceptance checks after the signed build:
+## 2. Windows — trusted Authenticode identity
 
-1. APK signing verification passes with Android `apksigner verify`.
-2. AAB signing verification/build step passes.
-3. Package ID remains `com.jbhprods.gdscriptlab`.
-4. Version remains `1.0.0` for this release.
-5. SHA-256 checksums are regenerated for the signed APK and AAB.
-6. The private keystore/passwords never appear in logs, release ZIPs, Actions artifacts, commits, or public documentation.
-7. The same signing identity is retained securely for future upgrades.
+Obtain a current trusted Windows **code-signing** certificate from a supported certificate provider. An ordinary TLS/SSL certificate is not sufficient.
 
-## Windows
+GitHub Actions secrets:
 
-The validated NSIS and MSI installers function without Authenticode, but public distribution is better with a trusted code-signing certificate.
+- `WINDOWS_CERTIFICATE_BASE64` — base64 encoding of the publisher-owned `.pfx`
+- `WINDOWS_CERTIFICATE_PASSWORD` — PFX export password
 
-Recommended final checks:
+Optional repository variable:
 
-1. Sign both `GDScript-Lab-v1.0.0-Setup.exe` and `GDScript-Lab-v1.0.0.msi` with the publisher's Authenticode certificate.
-2. Apply a trusted timestamp during signing.
-3. Verify the signature on a clean Windows system.
-4. Re-run installer launch/smoke checks after signing.
-5. Regenerate SHA-256 checksums.
+- `WINDOWS_TIMESTAMP_URL` — timestamp service recommended by the certificate issuer. If omitted, CI falls back to `http://timestamp.digicert.com`.
 
-Do not commit a certificate private key or password to the repository.
+Final CI acceptance gates:
 
-## macOS
+1. Temporary import into the runner's CurrentUser certificate store only.
+2. Tauri builds Authenticode-signed NSIS and MSI installers.
+3. `Get-AuthenticodeSignature` returns `Valid` for both final installers.
+4. The signed application executable launches and remains alive for the smoke interval.
+5. Final hashes are recomputed after signing.
 
-For polished public distribution, sign the application/bundle with the publisher's Apple Developer ID identity and notarize the resulting DMGs.
+Never commit the PFX or its password.
 
-For both Apple Silicon and Intel builds:
+## 3. macOS — Developer ID + notarization
 
-1. Sign all relevant application code with the correct Developer ID Application identity.
-2. Build the DMG from the signed app.
-3. Submit for Apple notarization.
-4. Staple the notarization result where applicable.
-5. Validate with macOS signing/Gatekeeper tools on a clean machine.
-6. Regenerate SHA-256 checksums after the final signed/notarized packaging.
+For direct downloads outside the Mac App Store, obtain/export a **Developer ID Application** certificate from the publisher's Apple Developer account and create App Store Connect API credentials for notarization.
 
-Apple private keys and account credentials must remain outside public repository history and public build artifacts.
+GitHub Actions secrets:
 
-## iOS
+- `MACOS_CERTIFICATE_BASE64` — base64 `.p12` containing the Developer ID Application certificate/private key
+- `MACOS_CERTIFICATE_PASSWORD` — `.p12` export password
+- `MACOS_KEYCHAIN_PASSWORD` — CI-only password used for the temporary runner keychain
+- `APPLE_API_ISSUER` — App Store Connect API issuer ID
+- `APPLE_API_KEY` — App Store Connect API key ID
+- `APPLE_API_PRIVATE_KEY_BASE64` — base64 contents of the downloaded `AuthKey_<KEYID>.p8`
 
-The current evidence is a successful no-sign native compile. A distributable IPA still needs a valid Apple signing/provisioning setup.
+Final CI acceptance gates for **both** Apple Silicon and Intel:
 
-Final requirements:
+1. Certificate imported only into an ephemeral runner keychain.
+2. Developer ID Application identity is detected.
+3. Tauri signs the `.app` and DMG and submits for notarization.
+4. `codesign --verify --deep --strict` passes.
+5. Gatekeeper assessment passes.
+6. `xcrun stapler validate` confirms a stapled notarization ticket.
+7. Final hashes are recomputed after notarization/signing.
 
-1. Apple Developer team/account with an appropriate distribution certificate.
-2. App identifier/provisioning configuration matching the intended bundle identity.
-3. Signed archive/export producing a distributable IPA.
-4. Installation/launch validation on a compatible real device or an appropriate distribution validation path.
-5. Final checksum generation.
+## 4. iOS — Apple Distribution + provisioning
 
-## Final release packaging rule
+Apple Developer/App Store Connect must have an App ID that matches `com.jbhprods.gdscriptlab` and an App Store Connect distribution provisioning profile linked to an Apple Distribution certificate.
 
-Only after the credential-dependent steps above are complete should the cross-platform bundle lose the `RC` designation.
+GitHub Actions secrets:
 
-The final release package should contain only public distributables, public verification/status text, source if intended, and checksums. It must not contain keystores, certificate private keys, signing passwords, Apple private credentials, or other secret material.
+- `IOS_CERTIFICATE` — base64 exported Apple Distribution `.p12`
+- `IOS_CERTIFICATE_PASSWORD` — `.p12` export password
+- `IOS_MOBILE_PROVISION` — base64 App Store Connect `.mobileprovision`
+- `APPLE_DEVELOPMENT_TEAM` — Apple Developer Team ID
+
+Final CI acceptance gates:
+
+1. Signed build uses export method `app-store-connect`.
+2. A distributable `.ipa` is actually generated.
+3. The extracted application passes `codesign --verify --deep --strict`.
+4. An embedded provisioning profile exists.
+5. The provisioning `application-identifier` ends in `com.jbhprods.gdscriptlab`.
+6. Final hashes are recomputed.
+
+## 5. Durable verified source
+
+`.github/workflows/archive-verified-source.yml` verifies the corrected source ZIP at SHA-256:
+
+`dc39f130eb650c08d5b8a3bea1b7a0ef392598fe98dd2af218734db24f2af4e4`
+
+and stores it in a **draft** GitHub Release tagged `v1.0.0-corrected-source-archive`. The final signed workflow downloads from this durable archive rather than relying on a 90-day Actions artifact.
+
+## 6. Final package and release
+
+When all five platform jobs pass, CI creates:
+
+`GDScript-Lab-v1.0.0-ALL-PLATFORMS-FINAL.zip`
+
+and its SHA-256 file. It then creates or refreshes a **draft** GitHub Release tagged `v1.0.0`. The release remains draft so the publisher can inspect the exact final artifacts and evidence before making them public.
+
+The final ZIP may contain public distributables, public verification evidence, source if intended, and checksums. It must never contain keystores, PFX/P12 private-key files, signing passwords, provisioning secrets, or Apple API private keys.
