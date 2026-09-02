@@ -1,0 +1,380 @@
+name: GDScript Lab UI maintenance full rebuild
+
+on:
+  push:
+    paths:
+      - '.github/ci-ui-maintenance-patch.py.gz'
+      - '.github/workflows/ui-maintenance-rebuild.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gdlab-ui-maintenance-full-rebuild-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  SOURCE_ZIP: GDScript_Lab_v1.0.0_Tauri_Production_Project_FINAL.zip
+  SOURCE_GIT_BLOB_SHA1: 43d91956291718bef62f80fb83384316f8e083e9
+  PROJECT_DIR: _incoming/GDScript_Lab_Tauri_v1.0.0
+  NODE_VERSION: '22.16.0'
+  PYTHON_VERSION: '3.13'
+  RUST_VERSION: '1.98.0'
+
+jobs:
+  source-audit:
+    name: Source integrity + audit
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Verify and unpack exact source ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git hash-object '${{ env.SOURCE_ZIP }}')" = '${{ env.SOURCE_GIT_BLOB_SHA1 }}'
+          python - <<'PY'
+          from pathlib import Path
+          import zipfile
+          z=Path('${{ env.SOURCE_ZIP }}')
+          out=Path('_incoming'); out.mkdir(exist_ok=True)
+          with zipfile.ZipFile(z) as f: f.extractall(out)
+          PY
+          python - <<'PY'
+          import gzip
+          from pathlib import Path
+          Path('.github/ci-ui-maintenance-patch.py').write_bytes(gzip.decompress(Path('.github/ci-ui-maintenance-patch.py.gz').read_bytes()))
+          PY
+          python .github/ci-ui-maintenance-patch.py '${{ env.PROJECT_DIR }}'
+      - name: Audit maintained source
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: python scripts/audit.py
+      - name: Check frontend JavaScript syntax
+        working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re, subprocess, tempfile
+          for rel in ['portable/GDScript_Lab_Godot47_v1.0.0.html','src/index.html']:
+              text=Path(rel).read_text(encoding='utf-8')
+              scripts=re.findall(r'<script(?:\s[^>]*)?>(.*?)</script>',text,re.S|re.I)
+              for i,code in enumerate(scripts):
+                  p=Path(tempfile.gettempdir())/f'gdlab-{Path(rel).name}-{i}.js'
+                  p.write_text(code,encoding='utf-8')
+                  subprocess.run(['node','--check',str(p)],check=True)
+          print('JavaScript syntax PASS')
+          PY
+      - name: Package exact CI-patched source snapshot
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import zipfile, os
+          root=Path('${{ env.PROJECT_DIR }}')
+          out=Path(os.environ['RUNNER_TEMP'])/'GDScript_Lab_v1.0.0_CI_PATCHED_SOURCE.zip'
+          with zipfile.ZipFile(out,'w',zipfile.ZIP_DEFLATED,compresslevel=9) as z:
+              for p in sorted(root.rglob('*')):
+                  if p.is_file(): z.write(p,p.relative_to(root.parent))
+          print(out)
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GDScript-Lab-v1.0.0-UIUX-CI-patched-source
+          retention-days: 7
+          path: ${{ runner.temp }}/GDScript_Lab_v1.0.0_CI_PATCHED_SOURCE.zip
+
+  desktop:
+    name: ${{ matrix.name }}
+    needs: source-audit
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x64 AppImage + DEB
+            os: ubuntu-22.04
+            bundles: appimage,deb
+            artifact: GDScript-Lab-v1.0.0-UIUX-Linux-x64
+            target: ''
+          - name: Windows x64 NSIS + MSI
+            os: windows-latest
+            bundles: nsis,msi
+            artifact: GDScript-Lab-v1.0.0-UIUX-Windows-x64
+            target: ''
+          - name: macOS Apple Silicon APP + DMG
+            os: macos-latest
+            bundles: app,dmg
+            artifact: GDScript-Lab-v1.0.0-UIUX-macOS-arm64
+            target: aarch64-apple-darwin
+          - name: macOS Intel APP + DMG
+            os: macos-latest
+            bundles: app,dmg
+            artifact: GDScript-Lab-v1.0.0-UIUX-macOS-x64
+            target: x86_64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Verify and unpack exact source ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git hash-object '${{ env.SOURCE_ZIP }}')" = '${{ env.SOURCE_GIT_BLOB_SHA1 }}'
+          python - <<'PY'
+          from pathlib import Path
+          import zipfile
+          z=Path('${{ env.SOURCE_ZIP }}')
+          out=Path('_incoming'); out.mkdir(exist_ok=True)
+          with zipfile.ZipFile(z) as f: f.extractall(out)
+          PY
+          python - <<'PY'
+          import gzip
+          from pathlib import Path
+          Path('.github/ci-ui-maintenance-patch.py').write_bytes(gzip.decompress(Path('.github/ci-ui-maintenance-patch.py.gz').read_bytes()))
+          PY
+          python .github/ci-ui-maintenance-patch.py '${{ env.PROJECT_DIR }}'
+      - name: Linux prerequisites
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf xdg-utils xvfb
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: ${{ matrix.target }}
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './_incoming/GDScript_Lab_Tauri_v1.0.0/src-tauri -> target'
+      - name: Locked install + source audit
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          npm install
+          npm run icons
+          python scripts/audit.py
+          cargo metadata --format-version 1 --manifest-path src-tauri/Cargo.toml > /dev/null
+      - name: Build native desktop bundles
+        working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n '${{ matrix.target }}' ]; then
+            npm run tauri -- build --target '${{ matrix.target }}' --bundles '${{ matrix.bundles }}'
+          else
+            npm run tauri -- build --bundles '${{ matrix.bundles }}'
+          fi
+      - name: Linux AppImage GUI smoke launch
+        if: runner.os == 'Linux'
+        working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP="$(find src-tauri/target -type f -name '*.AppImage' -print -quit)"
+          test -n "$APP"
+          chmod +x "$APP"
+          set +e
+          xvfb-run -a env APPIMAGE_EXTRACT_AND_RUN=1 "$APP" > "$RUNNER_TEMP/gdlab-linux-smoke.log" 2>&1 &
+          PID=$!
+          sleep 10
+          if kill -0 "$PID" 2>/dev/null; then
+            kill "$PID" || true
+            wait "$PID" || true
+            echo 'Linux GUI smoke PASS'
+            exit 0
+          fi
+          wait "$PID"; CODE=$?
+          cat "$RUNNER_TEMP/gdlab-linux-smoke.log" || true
+          exit "$CODE"
+      - name: Windows executable smoke launch
+        if: runner.os == 'Windows'
+        working-directory: ${{ env.PROJECT_DIR }}
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem -Path 'src-tauri/target' -Recurse -Filter '*.exe' | Where-Object { $_.FullName -match '\\release\\gdscript-lab\.exe$' } | Select-Object -First 1
+          if (-not $exe) { throw 'Built application executable not found' }
+          $p = Start-Process -FilePath $exe.FullName -PassThru
+          Start-Sleep -Seconds 10
+          if ($p.HasExited) { throw "Application exited during smoke window with code $($p.ExitCode)" }
+          Stop-Process -Id $p.Id -Force
+          'Windows GUI smoke PASS'
+      - name: Upload desktop bundles
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          if-no-files-found: error
+          retention-days: 7
+          path: |
+            ${{ env.PROJECT_DIR }}/src-tauri/target/**/bundle/**/*.AppImage
+            ${{ env.PROJECT_DIR }}/src-tauri/target/**/bundle/**/*.deb
+            ${{ env.PROJECT_DIR }}/src-tauri/target/**/bundle/**/*.exe
+            ${{ env.PROJECT_DIR }}/src-tauri/target/**/bundle/**/*.msi
+            ${{ env.PROJECT_DIR }}/src-tauri/target/**/bundle/**/*.dmg
+
+  android:
+    name: Android signed APK + AAB
+    needs: source-audit
+    runs-on: ubuntu-22.04
+    env:
+      ANDROID_KEY_BASE64: ${{ secrets.ANDROID_KEY_BASE64 }}
+      ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+      ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+      ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Verify and unpack exact source ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git hash-object '${{ env.SOURCE_ZIP }}')" = '${{ env.SOURCE_GIT_BLOB_SHA1 }}'
+          python - <<'PY'
+          from pathlib import Path
+          import zipfile
+          z=Path('${{ env.SOURCE_ZIP }}')
+          out=Path('_incoming'); out.mkdir(exist_ok=True)
+          with zipfile.ZipFile(z) as f: f.extractall(out)
+          PY
+          python - <<'PY'
+          import gzip
+          from pathlib import Path
+          Path('.github/ci-ui-maintenance-patch.py').write_bytes(gzip.decompress(Path('.github/ci-ui-maintenance-patch.py.gz').read_bytes()))
+          PY
+          python .github/ci-ui-maintenance-patch.py '${{ env.PROJECT_DIR }}'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - name: Install Android platform/build tools/NDK
+        shell: bash
+        run: |
+          sdkmanager 'platforms;android-36' 'build-tools;36.0.0' 'ndk;27.2.12479018'
+          echo "NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './_incoming/GDScript_Lab_Tauri_v1.0.0/src-tauri -> target'
+      - name: Require Android release signing secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$ANDROID_KEY_BASE64"
+          test -n "$ANDROID_KEY_ALIAS"
+          test -n "$ANDROID_KEYSTORE_PASSWORD"
+          test -n "$ANDROID_KEY_PASSWORD"
+      - name: Locked install + audit
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          npm install
+          npm run icons
+          python scripts/audit.py
+          cargo metadata --format-version 1 --manifest-path src-tauri/Cargo.toml > /dev/null
+      - name: Initialize and build Android release outputs
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          npm run android:init
+          npm run android:apk
+          npm run android:aab
+      - name: Sign and verify exact Android release artifacts
+        working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          BUILD_TOOLS="$ANDROID_HOME/build-tools/36.0.0"
+          KEYSTORE="$RUNNER_TEMP/gdlab-upload.jks"
+          OUT="$RUNNER_TEMP/gdlab-uiux-android"
+          mkdir -p "$OUT"
+          echo "$ANDROID_KEY_BASE64" | base64 --decode > "$KEYSTORE"
+          UNSIGNED_APK="$(find src-tauri/gen/android/app/build/outputs -type f -name '*release-unsigned.apk' -print -quit)"
+          AAB="$(find src-tauri/gen/android/app/build/outputs -type f -name '*.aab' -print -quit)"
+          test -n "$UNSIGNED_APK"; test -n "$AAB"
+          ALIGNED="$OUT/GDScript_Lab_v1.0.0_Android-aligned.apk"
+          SIGNED_APK="$OUT/GDScript_Lab_v1.0.0_Android.apk"
+          SIGNED_AAB="$OUT/GDScript_Lab_v1.0.0_Android.aab"
+          "$BUILD_TOOLS/zipalign" -f -p 4 "$UNSIGNED_APK" "$ALIGNED"
+          "$BUILD_TOOLS/zipalign" -c -v 4 "$ALIGNED" > "$OUT/APK_ZIPALIGN_VERIFICATION.txt"
+          "$BUILD_TOOLS/apksigner" sign --ks "$KEYSTORE" --ks-key-alias "$ANDROID_KEY_ALIAS" --ks-pass "pass:$ANDROID_KEYSTORE_PASSWORD" --key-pass "pass:$ANDROID_KEY_PASSWORD" --out "$SIGNED_APK" "$ALIGNED"
+          rm -f "$ALIGNED"
+          cp "$AAB" "$SIGNED_AAB"
+          jarsigner -keystore "$KEYSTORE" -storepass "$ANDROID_KEYSTORE_PASSWORD" -keypass "$ANDROID_KEY_PASSWORD" -sigalg SHA256withRSA -digestalg SHA-256 "$SIGNED_AAB" "$ANDROID_KEY_ALIAS"
+          "$BUILD_TOOLS/apksigner" verify --verbose --print-certs "$SIGNED_APK" | tee "$OUT/APK_SIGNATURE_VERIFICATION.txt"
+          jarsigner -verify -verbose -certs "$SIGNED_AAB" 2>&1 | tee "$OUT/AAB_SIGNATURE_VERIFICATION.txt"
+          grep -q 'jar verified' "$OUT/AAB_SIGNATURE_VERIFICATION.txt"
+          "$BUILD_TOOLS/aapt" dump badging "$SIGNED_APK" > "$OUT/APK_BADGING.txt"
+          if "$BUILD_TOOLS/zipalign" -h 2>&1 | grep -q -- '-P'; then
+            "$BUILD_TOOLS/zipalign" -c -P 16 -v 4 "$SIGNED_APK" > "$OUT/APK_16KB_ZIPALIGN_VERIFICATION.txt"
+          fi
+          sha256sum "$SIGNED_APK" "$SIGNED_AAB" > "$OUT/SHA256SUMS.txt"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GDScript-Lab-v1.0.0-UIUX-Android-signed
+          if-no-files-found: error
+          retention-days: 7
+          path: ${{ runner.temp }}/gdlab-uiux-android/**
+
+  ios-compile:
+    name: iOS unsigned compile check
+    needs: source-audit
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Verify and unpack exact source ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git hash-object '${{ env.SOURCE_ZIP }}')" = '${{ env.SOURCE_GIT_BLOB_SHA1 }}'
+          python - <<'PY'
+          from pathlib import Path
+          import zipfile
+          z=Path('${{ env.SOURCE_ZIP }}')
+          out=Path('_incoming'); out.mkdir(exist_ok=True)
+          with zipfile.ZipFile(z) as f: f.extractall(out)
+          PY
+          python - <<'PY'
+          import gzip
+          from pathlib import Path
+          Path('.github/ci-ui-maintenance-patch.py').write_bytes(gzip.decompress(Path('.github/ci-ui-maintenance-patch.py.gz').read_bytes()))
+          PY
+          python .github/ci-ui-maintenance-patch.py '${{ env.PROJECT_DIR }}'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: aarch64-apple-ios,x86_64-apple-ios,aarch64-apple-ios-sim
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './_incoming/GDScript_Lab_Tauri_v1.0.0/src-tauri -> target'
+      - name: Install CocoaPods
+        run: brew install cocoapods
+      - name: Locked install + audit + compile
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          npm install
+          npm run icons
+          python scripts/audit.py
+          cargo metadata --format-version 1 --manifest-path src-tauri/Cargo.toml > /dev/null
+          npm run ios:init
+          npm run ios:build
