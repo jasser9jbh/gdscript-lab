@@ -24,6 +24,8 @@ jobs:
         run: |
           set -euo pipefail
           python3 .github/repair_final_workflow.py
+          echo '--- generated workflow lines 65-100 ---'
+          nl -ba .github/workflows/final-signed-release.yml | sed -n '65,100p'
           python3 - <<'PY'
           import yaml
           with open('.github/workflows/final-signed-release.yml', encoding='utf-8') as f:
