@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Final isolated native release build trigger: 2026-09-02
 set -euo pipefail
 SOURCE_ZIP="${SOURCE_ZIP:-GDScript_Lab_v1.0.0_Tauri_Production_Project_FINAL.zip}"
 SOURCE_GIT_BLOB_SHA1="${SOURCE_GIT_BLOB_SHA1:-43d91956291718bef62f80fb83384316f8e083e9}"
