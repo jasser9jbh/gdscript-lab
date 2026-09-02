@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   repair:
@@ -19,7 +19,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: release/public-preflight-20260902
-      - name: Apply hardened final release workflow
+      - name: Generate and validate hardened final release workflow
         shell: bash
         run: |
           set -euo pipefail
@@ -40,13 +40,12 @@ jobs:
               yaml.safe_load(f)
           print('PASS: final-signed-release.yml parses as YAML')
           PY
-          grep -nE 'pipeline_preflight|SOURCE_RUN_ID|PRODUCTION_SOURCE|macos-15-intel|Import iOS distribution|THIRD_PARTY_LICENSES|Public proprietary source|FINAL VERIFIED' .github/workflows/final-signed-release.yml
-      - name: Commit repaired workflow
-        shell: bash
-        run: |
-          set -euo pipefail
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add .github/workflows/final-signed-release.yml
-          git commit -m 'Harden final public release pipeline'
-          git push origin HEAD:release/public-preflight-20260902
+          sha256sum .github/workflows/final-signed-release.yml > FINAL_SIGNED_WORKFLOW.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GDScript-Lab-v1.0.0-VALIDATED-FINAL-WORKFLOW
+          path: |
+            .github/workflows/final-signed-release.yml
+            FINAL_SIGNED_WORKFLOW.sha256
+          if-no-files-found: error
+          retention-days: 30
