@@ -8,4 +8,19 @@ rm -rf _incoming && mkdir -p _incoming
 python -m zipfile -e "$SOURCE_ZIP" _incoming
 cat .github/final-transform-chunks/part-*.b64 | tr -d '\r\n' | base64 --decode | gzip -dc > "${RUNNER_TEMP:-/tmp}/gdlab-final-transform.py"
 python "${RUNNER_TEMP:-/tmp}/gdlab-final-transform.py" "$PROJECT_DIR"
+python - "$PROJECT_DIR/src-tauri/Cargo.toml" <<'PY'
+from pathlib import Path
+import sys
+p=Path(sys.argv[1]); s=p.read_text(encoding='utf-8')
+for name,old,new in [('tauri-build','2.5.6','2.6.3'),('tauri-plugin-fs','2.5.1','2.5.2')]:
+    before=f'version = "={old}"'
+    after=f'version = "={new}"'
+    if after in s:
+        continue
+    if before not in s:
+        raise SystemExit(f'Expected {name} compatibility pin {old} not found')
+    s=s.replace(before,after,1)
+p.write_text(s,encoding='utf-8')
+print('Applied validated Tauri build compatibility pins')
+PY
 (cd "$PROJECT_DIR" && python scripts/audit.py)
