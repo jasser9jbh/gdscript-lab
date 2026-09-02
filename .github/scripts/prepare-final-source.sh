@@ -49,7 +49,8 @@ print('Applied validated Tauri compatibility pins and synchronized audit contrac
 PY
 
 # Make the source artifact reproducible/buildable on every downstream runner.
-# The frontend and course hashes are unaffected by these lockfiles.
+# Validate npm from a clean install, retain only the lockfile, and never package
+# node_modules (ZIP extraction can strip executable bits from .bin shims).
 (
   cd "$PROJECT_DIR"
   npm install --package-lock-only --ignore-scripts --no-audit --no-fund
@@ -66,6 +67,10 @@ rustup toolchain install 1.98.0 --profile minimal --no-self-update
   cd "$PROJECT_DIR"
   cargo +1.98.0 metadata --locked --format-version 1 --manifest-path src-tauri/Cargo.toml > /dev/null
   python scripts/audit.py
+  rm -rf node_modules
+  test -f package-lock.json
+  test -f src-tauri/Cargo.lock
+  test ! -e node_modules
 )
 
 printf '%s\n' 'FINAL BUILDABLE HARDENED SOURCE PASS'
