@@ -17,6 +17,8 @@ The corrected source artifact is the canonical source used for the final native 
 
 The strongest cohesive release validation is `.github/workflows/final-production-release-v7.yml`, proven by GitHub Actions run `33686784014`. The production-safe Android signing path is `.github/workflows/final-android-production-v5-windows.yml`.
 
+For the exact release matrix and remaining blockers, see `RELEASE_STATUS.md`. For the credential-dependent production signing procedure, see `SIGNING_HANDOFF.md`.
+
 ### Reproducibility retention note
 
 The validated v7 workflow consumes the corrected source artifact from Actions run `33644641089`. GitHub Actions artifacts are retention-limited, so that run must **not** be treated as permanent source storage. Keep an independently archived copy of the corrected normalized v1.0.0 source package and its SHA-256 alongside release records. The older repository-root source ZIP and reconstruction helpers are historical inputs, not a substitute for the verified corrected source package unless a fresh reconstruction is revalidated against the hashes above.
