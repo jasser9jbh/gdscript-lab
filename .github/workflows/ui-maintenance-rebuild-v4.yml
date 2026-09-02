@@ -19,9 +19,6 @@ env:
   SOURCE_ZIP: GDScript_Lab_v1.0.0_Tauri_Production_Project_FINAL.zip
   SOURCE_GIT_BLOB_SHA1: 43d91956291718bef62f80fb83384316f8e083e9
   PROJECT_DIR: _incoming/GDScript_Lab_Tauri_v1.0.0
-  NODE_VERSION: '22.16.0'
-  PYTHON_VERSION: '3.13'
-  RUST_VERSION: '1.98.0'
 
 jobs:
   source:
@@ -111,9 +108,9 @@ jobs:
         working-directory: GDScript_Lab_Tauri_v1.0.0
         shell: bash
         run: |
-          npm ci
+          npm install
           npm run icons
-          cargo metadata --locked --format-version 1 --manifest-path src-tauri/Cargo.toml > /dev/null
+          cargo metadata --format-version 1 --manifest-path src-tauri/Cargo.toml > /dev/null
           if [ -n '${{ matrix.target }}' ]; then npm run tauri -- build --target '${{ matrix.target }}' --bundles '${{ matrix.bundles }}'; else npm run tauri -- build --bundles '${{ matrix.bundles }}'; fi
       - name: Linux GUI smoke
         if: runner.os == 'Linux'
@@ -180,9 +177,9 @@ jobs:
       - name: Build Android
         working-directory: GDScript_Lab_Tauri_v1.0.0
         run: |
-          npm ci
+          npm install
           npm run icons
-          cargo metadata --locked --format-version 1 --manifest-path src-tauri/Cargo.toml > /dev/null
+          cargo metadata --format-version 1 --manifest-path src-tauri/Cargo.toml > /dev/null
           npm run android:init
           npm run android:apk
           npm run android:aab
@@ -229,8 +226,8 @@ jobs:
       - name: Compile unsigned iOS
         working-directory: GDScript_Lab_Tauri_v1.0.0
         run: |
-          npm ci
+          npm install
           npm run icons
-          cargo metadata --locked --format-version 1 --manifest-path src-tauri/Cargo.toml > /dev/null
+          cargo metadata --format-version 1 --manifest-path src-tauri/Cargo.toml > /dev/null
           npm run ios:init
           npm run ios:build
