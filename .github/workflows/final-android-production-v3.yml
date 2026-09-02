@@ -21,7 +21,7 @@ env:
 jobs:
   android:
     name: Build sign and validate Android release
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/setup-python@v5
         with: { python-version: '3.13' }
