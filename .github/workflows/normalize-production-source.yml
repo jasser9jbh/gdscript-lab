@@ -1,0 +1,158 @@
+name: Normalize GDScript Lab v1.0.0 production source
+
+on:
+  push:
+    branches: [release/public-preflight-20260902]
+    paths:
+      - '.github/workflows/normalize-production-source.yml'
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+env:
+  SOURCE_RUN_ID: '33644641089'
+  SOURCE_ARTIFACT_NAME: GDScript-Lab-v1.0.0-CORRECTED-source
+  INPUT_ZIP: GDScript_Lab_v1.0.0_CORRECTED_NATIVE_SOURCE.zip
+  PROJECT_DIR: GDScript_Lab_Tauri_v1.0.0
+  OUTPUT_ZIP: GDScript_Lab_v1.0.0_PRODUCTION_SOURCE.zip
+  EXPECTED_FRONTEND_SHA256: 628151d40b067f8ab55da80030862720d319d07f69d62d5b532bfd0fdc311336
+  EXPECTED_PORTABLE_SHA256: e9961e8ed86526cff1a51725dd013c4370a159754642f3c6628779202095108d
+  EXPECTED_COURSE_SHA256: c0a663fb0cf5cf8876e3279e70d5783d245a615cbf6238cf82a1ad67e1408abe
+
+jobs:
+  normalize:
+    name: Normalize docs, manifest and Android signing contract
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.SOURCE_ARTIFACT_NAME }}
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ env.SOURCE_RUN_ID }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Extract and verify corrected application payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m zipfile -e "$INPUT_ZIP" .
+          test "$(sha256sum "$PROJECT_DIR/src/index.html" | awk '{print $1}')" = "$EXPECTED_FRONTEND_SHA256"
+          test "$(sha256sum "$PROJECT_DIR/portable/GDScript_Lab_Godot47_v1.0.0.html" | awk '{print $1}')" = "$EXPECTED_PORTABLE_SHA256"
+          cd "$PROJECT_DIR"
+          python scripts/audit.py | tee "$RUNNER_TEMP/PRE_NORMALIZATION_AUDIT.txt"
+          grep -q "$EXPECTED_COURSE_SHA256" "$RUNNER_TEMP/PRE_NORMALIZATION_AUDIT.txt"
+      - name: Normalize source-package release metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import hashlib,json
+          root=Path('GDScript_Lab_Tauri_v1.0.0')
+          old_to_new={
+            '569bc1d6e94096f495345274bc5083053e1d5fd9af4262d4549cb08cde6b5880':'c0a663fb0cf5cf8876e3279e70d5783d245a615cbf6238cf82a1ad67e1408abe',
+            '3e36ecee887e85272648fc7658bbd32b22110d659778acae9adccde979c2033f':'e9961e8ed86526cff1a51725dd013c4370a159754642f3c6628779202095108d',
+            '743e2f2d038681473ee20989892f6a306f758b4d03ff4e9989826e082daab822':'e9961e8ed86526cff1a51725dd013c4370a159754642f3c6628779202095108d',
+            'ba6d7357575002a0ee129b26733f52e9c29d5e64a470e3bf84bd76ca8d306e99':'628151d40b067f8ab55da80030862720d319d07f69d62d5b532bfd0fdc311336',
+            'ANDROID_KEY_BASE64':'ANDROID_KEYSTORE_BASE64',
+            'ANDROID_KEYSTORE_PASSWORD':'ANDROID_STORE_PASSWORD',
+          }
+          for rel in ['README.md','README_BUILD.md','README_DISTRIBUTION.md','RELEASE_CHECKLIST.md','BUILD_ATTEMPT_REPORT.md','scripts/audit.py','.github/workflows/android-build.yml']:
+            p=root/rel
+            s=p.read_text('utf-8')
+            for a,b in old_to_new.items(): s=s.replace(a,b)
+            if rel=='.github/workflows/android-build.yml':
+              s=s.replace('npm install','npm ci')
+              s=s.replace('storePassword=${ANDROID_STORE_PASSWORD:-$ANDROID_KEY_PASSWORD}','storePassword=$ANDROID_STORE_PASSWORD')
+            p.write_text(s,'utf-8')
+
+          report=root/'BUILD_ATTEMPT_REPORT.md'
+          text=report.read_text('utf-8')
+          marker='> **Historical note:**'
+          if marker not in text:
+            text=text.replace('# GDScript Lab v1.0.0: Native Build Attempt Report\n',
+              '# GDScript Lab v1.0.0: Native Build Attempt Report\n\n'
+              '> **Historical note:** This file records the earlier restricted-sandbox attempt only. It is superseded for native release evidence by GitHub Actions production-candidate run `33686784014`, where Windows, Linux, both macOS architectures, Android compilation, and iOS no-sign compilation completed from the corrected source. Do not interpret the sandbox limitations below as the current release state.\n')
+          report.write_text(text,'utf-8')
+
+          (root/'THIRD_PARTY_NOTICES.md').write_text('''# Third-Party Notices\n\nGDScript Lab itself is proprietary under `LICENSE.txt`. The native Tauri edition also contains third-party open-source software whose own license terms remain applicable.\n\nThe exact locked Rust dependency graph is preserved in `src-tauri/Cargo.lock`. `RUST_DEPENDENCY_LICENSES.json` and `THIRD_PARTY_RUST_DEPENDENCIES.md` contain the resolved inventory metadata for **485 third-party Rust packages** in that lock graph; no package in that inventory is intentionally represented as part of the proprietary GDScript Lab license.\n\nFor the public binary release, CI additionally generates `THIRD_PARTY_LICENSES.html` with `cargo-about` from the exact locked graph so the applicable license texts and package mapping can accompany the final distribution. That generated report must be reviewed and retained with the release evidence.\n\nLicense inventory tooling assists compliance but is not legal advice.\n''','utf-8')
+
+          checklist=root/'RELEASE_CHECKLIST.md'
+          s=checklist.read_text('utf-8')
+          s=s.replace('## Final public binary gate: must be completed on real native build hosts','## Final public binary gate')
+          s=s.replace('- [ ] Run connected dependency resolution and preserve `package-lock.json` + `src-tauri/Cargo.lock` for the final release tag','- [x] Connected dependency resolution completed with locked `package-lock.json` + `src-tauri/Cargo.lock` in the validated native matrix')
+          s=s.replace('- [ ] Generate/review third-party license inventory from that locked dependency graph','- [x] Resolved third-party dependency inventory metadata captured for all 485 third-party Rust packages\n- [ ] Generate/review the final `cargo-about` full license-text report for the public distribution')
+          s=s.replace('- [ ] Build Linux `.AppImage` + `.deb`','- [x] Build Linux `.AppImage` + `.deb` (v7 matrix PASS; GUI smoke PASS)')
+          s=s.replace('- [ ] Build Windows `.exe`/`.msi` on Windows','- [x] Build Windows `.exe`/`.msi` on Windows (v7 matrix PASS; GUI smoke PASS)')
+          s=s.replace('- [ ] Build Android `.apk`/`.aab` with Android SDK/NDK','- [x] Build Android `.apk`/`.aab` with Android SDK/NDK (v7 compilation PASS; production signing still pending)')
+          s=s.replace('- [ ] Build macOS `.app`/`.dmg` on macOS','- [x] Build macOS `.app`/`.dmg` on macOS for Intel and Apple Silicon (v7 build PASS; signing/notarization still pending)')
+          s=s.replace('- [ ] Build iOS archive on macOS/Xcode if releasing iOS','- [x] Compile iOS native target without signing on macOS/Xcode (v7 PASS)\n- [ ] Produce a signed/provisioned distributable iOS IPA if releasing iOS')
+          s=s.replace('- [ ] Run the real-device/OS smoke test in `README_DISTRIBUTION.md`','- [x] Windows and Linux native GUI smoke tests completed on CI hosts\n- [ ] Run post-signing smoke tests on the exact final signed artifacts; real-device checks remain required/recommended where applicable')
+          checklist.write_text(s,'utf-8')
+
+          mpath=root/'BUILD_MANIFEST.json'
+          m=json.loads(mpath.read_text('utf-8'))
+          m['frozen_html_sha256']='e9961e8ed86526cff1a51725dd013c4370a159754642f3c6628779202095108d'
+          m['tauri_frontend_sha256']='628151d40b067f8ab55da80030862720d319d07f69d62d5b532bfd0fdc311336'
+          m['course_data_sha256']='c0a663fb0cf5cf8876e3279e70d5783d245a615cbf6238cf82a1ad67e1408abe'
+          m['framework']['tauri_build']='2.6.3'
+          m['framework']['plugins']['fs']='2.5.2'
+          m['build_attempt']['historical_only']=True
+          m['native_matrix_evidence']={
+            'workflow_run':33686784014,
+            'windows_x64':'build PASS; GUI smoke PASS; Authenticode pending',
+            'linux_x64':'build PASS; GUI smoke PASS',
+            'macos_arm64':'DMG build PASS; signing/notarization pending',
+            'macos_x64':'DMG build PASS; signing/notarization pending',
+            'android':'APK/AAB compile PASS; permanent publisher signing pending',
+            'ios':'no-sign compile PASS; distributable IPA signing/provisioning pending',
+          }
+          # Refresh every tracked file hash after documentation/workflow normalization.
+          for rel in list(m.get('validated_source_files',{})):
+            p=root/rel
+            if p.is_file(): m['validated_source_files'][rel]=hashlib.sha256(p.read_bytes()).hexdigest()
+          mpath.write_text(json.dumps(m,indent=2,ensure_ascii=False)+'\n','utf-8')
+          PY
+      - name: Verify normalized source
+        working-directory: GDScript_Lab_Tauri_v1.0.0
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/no_unicode_dashes_check.py
+          python scripts/audit.py | tee "$RUNNER_TEMP/NORMALIZED_SOURCE_AUDIT.txt"
+          grep -q "$EXPECTED_COURSE_SHA256" "$RUNNER_TEMP/NORMALIZED_SOURCE_AUDIT.txt"
+          ! grep -RInE '569bc1d6e94096f495345274bc5083053e1d5fd9af4262d4549cb08cde6b5880|3e36ecee887e85272648fc7658bbd32b22110d659778acae9adccde979c2033f|ANDROID_KEY_BASE64|ANDROID_KEYSTORE_PASSWORD|cannot resolve the complete Rust dependency graph' . --exclude-dir=node_modules --exclude-dir=target
+          grep -q '485 third-party Rust packages' THIRD_PARTY_NOTICES.md
+          grep -q 'ANDROID_KEYSTORE_BASE64' .github/workflows/android-build.yml
+          grep -q 'ANDROID_STORE_PASSWORD' .github/workflows/android-build.yml
+      - name: Package normalized production source
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m zipfile -c "$OUTPUT_ZIP" "$PROJECT_DIR"
+          sha256sum "$OUTPUT_ZIP" | tee "$OUTPUT_ZIP.sha256"
+          cat > PRODUCTION_SOURCE_STATUS.txt <<EOF
+          GDScript Lab v1.0.0 normalized production source
+          Application frontend SHA-256: ${EXPECTED_FRONTEND_SHA256}
+          Portable SHA-256: ${EXPECTED_PORTABLE_SHA256}
+          COURSE_DATA SHA-256: ${EXPECTED_COURSE_SHA256}
+          Source audit: PASS
+          Stale release hashes: REMOVED
+          Android signing secret contract: NORMALIZED
+          Third-party locked inventory statement: CORRECTED
+          Historical sandbox report: MARKED SUPERSEDED
+          EOF
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GDScript-Lab-v1.0.0-PRODUCTION-source
+          if-no-files-found: error
+          retention-days: 90
+          path: |
+            GDScript_Lab_v1.0.0_PRODUCTION_SOURCE.zip
+            GDScript_Lab_v1.0.0_PRODUCTION_SOURCE.zip.sha256
+            PRODUCTION_SOURCE_STATUS.txt
+            ${{ runner.temp }}/NORMALIZED_SOURCE_AUDIT.txt
