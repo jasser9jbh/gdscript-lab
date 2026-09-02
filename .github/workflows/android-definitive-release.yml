@@ -1,0 +1,171 @@
+name: GDScript Lab definitive Android signed release
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/android-definitive-release.yml'
+      - '.github/scripts/prepare-final-source.sh'
+      - '.github/final-transform-chunks/**'
+
+permissions:
+  contents: read
+
+env:
+  SOURCE_ZIP: GDScript_Lab_v1.0.0_Tauri_Production_Project_FINAL.zip
+  SOURCE_GIT_BLOB_SHA1: 43d91956291718bef62f80fb83384316f8e083e9
+  PROJECT_DIR: _incoming/GDScript_Lab_Tauri_v1.0.0
+
+jobs:
+  android:
+    name: Build, sign, verify, emulator smoke
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.13' }
+      - uses: actions/setup-node@v4
+        with: { node-version: '22.16.0' }
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: '17' }
+      - uses: android-actions/setup-android@v3
+      - name: Install Android SDK and NDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdkmanager 'platforms;android-36' 'build-tools;36.0.0' 'ndk;27.2.12479018' 'platform-tools'
+          echo "NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.98.0'
+          targets: 'aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android'
+      - uses: swatinem/rust-cache@v2
+        with: { workspaces: './_incoming/GDScript_Lab_Tauri_v1.0.0/src-tauri -> target' }
+      - name: Prepare exact hardened buildable source
+        shell: bash
+        run: |
+          bash .github/scripts/prepare-final-source.sh
+          cd "$PROJECT_DIR"
+          test "$(sha256sum portable/GDScript_Lab_Godot47_v1.0.0.html | awk '{print $1}')" = '3e36ecee887e85272648fc7658bbd32b22110d659778acae9adccde979c2033f'
+          test "$(sha256sum src/index.html | awk '{print $1}')" = 'ba6d7357575002a0ee129b26733f52e9c29d5e64a470e3bf84bd76ca8d306e99'
+          test -f package-lock.json
+          test -f src-tauri/Cargo.lock
+          test ! -e node_modules
+      - name: Build canonical APK and AAB
+        working-directory: _incoming/GDScript_Lab_Tauri_v1.0.0
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm run icons
+          cargo metadata --locked --format-version 1 --manifest-path src-tauri/Cargo.toml > /dev/null
+          npm run android:init
+          npm run android:apk
+          npm run android:aab
+      - name: Generate final production signing identity, sign, and verify
+        working-directory: _incoming/GDScript_Lab_Tauri_v1.0.0
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          BT="$ANDROID_HOME/build-tools/36.0.0"
+          OUT="$RUNNER_TEMP/android-final"
+          PRIVATE="$RUNNER_TEMP/android-signing-private"
+          KS="$PRIVATE/GDScript_Lab_v1.0.0_Android_Release_Key.jks"
+          mkdir -p "$OUT" "$PRIVATE"
+
+          PASS="$(openssl rand -base64 42 | tr -d '\r\n')"
+          ALIAS='gdscript-lab-release'
+          keytool -genkeypair -v -keystore "$KS" -storepass "$PASS" -keypass "$PASS" -alias "$ALIAS" -keyalg RSA -keysize 4096 -validity 10000 -dname 'CN=GDScript Lab, O=Journey Beyond Horizons Productions (JBH PRODS), C=TN'
+
+          U="$(find src-tauri/gen/android/app/build/outputs -type f -name '*release-unsigned.apk' -print -quit)"
+          A="$(find src-tauri/gen/android/app/build/outputs -type f -name '*.aab' -print -quit)"
+          test -n "$U"; test -n "$A"
+
+          "$BT/zipalign" -f -p 4 "$U" "$OUT/aligned.apk"
+          "$BT/apksigner" sign --ks "$KS" --ks-key-alias "$ALIAS" --ks-pass "pass:$PASS" --key-pass "pass:$PASS" --out "$OUT/GDScript_Lab_v1.0.0_Android.apk" "$OUT/aligned.apk"
+          cp "$A" "$OUT/GDScript_Lab_v1.0.0_Android.aab"
+          jarsigner -keystore "$KS" -storepass "$PASS" -keypass "$PASS" -sigalg SHA256withRSA -digestalg SHA-256 "$OUT/GDScript_Lab_v1.0.0_Android.aab" "$ALIAS"
+          rm -f "$OUT/aligned.apk"
+
+          "$BT/apksigner" verify --verbose --print-certs "$OUT/GDScript_Lab_v1.0.0_Android.apk" | tee "$OUT/APK_SIGNATURE_VERIFICATION.txt"
+          jarsigner -verify -verbose -certs "$OUT/GDScript_Lab_v1.0.0_Android.aab" 2>&1 | tee "$OUT/AAB_SIGNATURE_VERIFICATION.txt"
+          grep -q 'jar verified' "$OUT/AAB_SIGNATURE_VERIFICATION.txt"
+          "$BT/zipalign" -c -v 4 "$OUT/GDScript_Lab_v1.0.0_Android.apk" > "$OUT/APK_ZIPALIGN_VERIFICATION.txt"
+          if "$BT/zipalign" -h 2>&1 | grep -q -- '-P'; then
+            "$BT/zipalign" -c -P 16 -v 4 "$OUT/GDScript_Lab_v1.0.0_Android.apk" > "$OUT/APK_16KB_ZIPALIGN_VERIFICATION.txt"
+          fi
+          "$BT/aapt" dump badging "$OUT/GDScript_Lab_v1.0.0_Android.apk" > "$OUT/APK_BADGING.txt"
+          grep -q "package: name='com.jbhprods.gdscriptlab'" "$OUT/APK_BADGING.txt"
+          grep -q "versionName='1.0.0'" "$OUT/APK_BADGING.txt"
+          sha256sum "$OUT/GDScript_Lab_v1.0.0_Android.apk" "$OUT/GDScript_Lab_v1.0.0_Android.aab" > "$OUT/SHA256SUMS.txt"
+
+          CERT_SHA256="$(keytool -list -v -keystore "$KS" -storepass "$PASS" -alias "$ALIAS" | sed -n 's/^[[:space:]]*SHA256: //p' | tr -d ':' | tr '[:upper:]' '[:lower:]' | head -1)"
+          test -n "$CERT_SHA256"
+          printf 'Android release signing certificate SHA-256: %s\n' "$CERT_SHA256" > "$OUT/ANDROID_SIGNING_IDENTITY.txt"
+
+          {
+            printf '%s\n' 'GDScript Lab v1.0.0 — PRIVATE Android release signing backup'
+            printf '%s\n' 'KEEP THIS FILE AND THE .jks KEYSTORE PRIVATE. NEVER SHIP THEM WITH THE APP.'
+            printf 'Keystore file: %s\n' "$(basename "$KS")"
+            printf 'Key alias: %s\n' "$ALIAS"
+            printf 'Keystore password: %s\n' "$PASS"
+            printf 'Key password: %s\n' "$PASS"
+            printf 'Signing certificate SHA-256: %s\n' "$CERT_SHA256"
+            printf '%s\n' 'Use this same key for all future Android updates to com.jbhprods.gdscriptlab.'
+          } > "$PRIVATE/ANDROID_SIGNING_CREDENTIALS_PRIVATE.txt"
+          sha256sum "$KS" > "$PRIVATE/KEYSTORE_SHA256.txt"
+      - name: Run signed APK on Android 35 emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          arch: x86_64
+          profile: pixel_6
+          disable-animations: true
+          script: |
+            set -euo pipefail
+            OUT="$RUNNER_TEMP/android-final"
+            APK="$OUT/GDScript_Lab_v1.0.0_Android.apk"
+            AAPT="$ANDROID_HOME/build-tools/36.0.0/aapt"
+            adb install -r "$APK" | tee "$OUT/EMULATOR_INSTALL.txt"
+            PKG="$($AAPT dump badging "$APK" | sed -n "s/package: name='\([^']*\)'.*/\1/p" | head -1)"
+            ACT="$($AAPT dump badging "$APK" | sed -n "s/launchable-activity: name='\([^']*\)'.*/\1/p" | head -1)"
+            test "$PKG" = 'com.jbhprods.gdscriptlab'
+            test -n "$ACT"
+            adb logcat -c
+            adb shell am force-stop "$PKG"
+            adb shell am start -W -n "$PKG/$ACT" | tee "$OUT/EMULATOR_ACTIVITY_START.txt"
+            grep -q 'Status: ok' "$OUT/EMULATOR_ACTIVITY_START.txt"
+            sleep 8
+            PID="$(adb shell pidof "$PKG" | tr -d '\r' | xargs)"
+            test -n "$PID"
+            printf 'package=%s\nactivity=%s\npid=%s\n' "$PKG" "$ACT" "$PID" > "$OUT/EMULATOR_RUNTIME_PASS.txt"
+            adb shell dumpsys activity top > "$OUT/EMULATOR_ACTIVITY_TOP.txt"
+            grep -F "$PKG" "$OUT/EMULATOR_ACTIVITY_TOP.txt"
+            adb logcat -d > "$OUT/EMULATOR_LOGCAT.txt"
+            if grep -F "Process: $PKG" "$OUT/EMULATOR_LOGCAT.txt" | grep -q .; then
+              echo 'Detected AndroidRuntime crash record for app process' >&2
+              exit 1
+            fi
+            adb exec-out screencap -p > "$OUT/EMULATOR_SCREENSHOT.png"
+            test -s "$OUT/EMULATOR_SCREENSHOT.png"
+      - name: Reverify signed payload after runtime QA
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="$RUNNER_TEMP/android-final"; BT="$ANDROID_HOME/build-tools/36.0.0"
+          "$BT/apksigner" verify --verbose --print-certs "$OUT/GDScript_Lab_v1.0.0_Android.apk" > "$OUT/APK_SIGNATURE_VERIFICATION_POST_RUNTIME.txt"
+          jarsigner -verify "$OUT/GDScript_Lab_v1.0.0_Android.aab" > "$OUT/AAB_SIGNATURE_VERIFICATION_POST_RUNTIME.txt" 2>&1
+          grep -q 'jar verified' "$OUT/AAB_SIGNATURE_VERIFICATION_POST_RUNTIME.txt"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GDScript-Lab-v1.0.0-DEFINITIVE-Android-signed-runtime-verified
+          path: ${{ runner.temp }}/android-final/**
+          if-no-files-found: error
+          retention-days: 7
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GDScript-Lab-v1.0.0-PRIVATE-Android-signing-backup
+          path: ${{ runner.temp }}/android-signing-private/**
+          if-no-files-found: error
+          retention-days: 1
