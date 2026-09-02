@@ -1,29 +1,142 @@
-name: GDScript Lab Android v5 legacy workflow (disabled)
+name: GDScript Lab Android production-safe v5
 
 on:
+  push:
+    branches: [uiux-native-final-run-20260902]
+    paths:
+      - '.github/workflows/final-android-production-v5-windows.yml'
   workflow_dispatch:
 
 permissions:
   contents: read
+  actions: read
+
+env:
+  PROJECT_DIR: GDScript_Lab_Tauri_v1.0.0
+  EXPECTED_FRONTEND_SHA256: 628151d40b067f8ab55da80030862720d319d07f69d62d5b532bfd0fdc311336
+  EXPECTED_PORTABLE_SHA256: e9961e8ed86526cff1a51725dd013c4370a159754642f3c6628779202095108d
+  ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+  ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+  ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+  ANDROID_STORE_PASSWORD: ${{ secrets.ANDROID_STORE_PASSWORD }}
 
 jobs:
-  retired:
-    name: Legacy signer retired
-    runs-on: ubuntu-22.04
+  android:
+    name: Build Android release with persistent signing identity
+    runs-on: windows-latest
     steps:
-      - name: Explain replacement
-        shell: bash
-        run: |
-          cat <<'EOF'
-          This legacy workflow is intentionally disabled for production signing.
-          It previously generated a new Android keystore per run and uploaded the private signing backup as an Actions artifact.
-          That behavior is unsafe for a stable Android update identity and must not be used for public releases.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
 
-          Use .github/workflows/release-v1-production-safe.yml instead.
-          Production Android signing must use one persistent owner-controlled keystore supplied only through GitHub Actions secrets:
-            ANDROID_KEYSTORE_BASE64
-            ANDROID_KEY_ALIAS
-            ANDROID_KEY_PASSWORD
-            ANDROID_STORE_PASSWORD
-          The replacement workflow never uploads the private keystore.
-          EOF
+      - uses: actions/download-artifact@v4
+        with:
+          name: GDScript-Lab-v1.0.0-CORRECTED-source
+          path: source-artifact
+          repository: jasser9jbh/gdscript-lab
+          run-id: 33644641089
+          github-token: ${{ github.token }}
+
+      - name: Extract and verify corrected source
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Expand-Archive -LiteralPath 'source-artifact/GDScript_Lab_v1.0.0_CORRECTED_NATIVE_SOURCE.zip' -DestinationPath '.' -Force
+          $front = (Get-FileHash "$env:PROJECT_DIR/src/index.html" -Algorithm SHA256).Hash.ToLower()
+          $portable = (Get-FileHash "$env:PROJECT_DIR/portable/GDScript_Lab_Godot47_v1.0.0.html" -Algorithm SHA256).Hash.ToLower()
+          if ($front -ne $env:EXPECTED_FRONTEND_SHA256) { throw "Frontend hash mismatch: $front" }
+          if ($portable -ne $env:EXPECTED_PORTABLE_SHA256) { throw "Portable hash mismatch: $portable" }
+          Push-Location $env:PROJECT_DIR
+          python scripts/audit.py
+          Pop-Location
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.16.0'
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK and NDK
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          sdkmanager 'platform-tools' 'platforms;android-36' 'build-tools;36.0.0' 'ndk;27.2.12479018'
+          "NDK_HOME=$env:ANDROID_HOME\ndk\27.2.12479018" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.98.0'
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './GDScript_Lab_Tauri_v1.0.0/src-tauri -> target'
+
+      - name: Build canonical APK and AAB
+        working-directory: GDScript_Lab_Tauri_v1.0.0
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          npm ci
+          npm run icons
+          python scripts/audit.py
+          cargo metadata --locked --format-version 1 --manifest-path src-tauri/Cargo.toml | Out-Null
+          npm run android:init
+          npm run android:apk
+          npm run android:aab
+
+      - name: Stage release and sign only with persistent owner secrets
+        working-directory: GDScript_Lab_Tauri_v1.0.0
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bt = Join-Path $env:ANDROID_HOME 'build-tools\36.0.0'
+          $out = Join-Path $env:RUNNER_TEMP 'android-release'
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          $unsignedApk = Get-ChildItem 'src-tauri/gen/android/app/build/outputs' -Recurse -Filter '*release-unsigned.apk' | Select-Object -First 1
+          $aab = Get-ChildItem 'src-tauri/gen/android/app/build/outputs' -Recurse -Filter '*.aab' | Select-Object -First 1
+          if (-not $unsignedApk) { throw 'Unsigned APK not found' }
+          if (-not $aab) { throw 'AAB not found' }
+
+          $haveSecrets = -not [string]::IsNullOrWhiteSpace($env:ANDROID_KEYSTORE_BASE64) -and -not [string]::IsNullOrWhiteSpace($env:ANDROID_KEY_ALIAS) -and -not [string]::IsNullOrWhiteSpace($env:ANDROID_KEY_PASSWORD) -and -not [string]::IsNullOrWhiteSpace($env:ANDROID_STORE_PASSWORD)
+          if ($haveSecrets) {
+            $ks = Join-Path $env:RUNNER_TEMP 'gdlab-release.jks'
+            [IO.File]::WriteAllBytes($ks, [Convert]::FromBase64String($env:ANDROID_KEYSTORE_BASE64))
+            $aligned = Join-Path $out 'aligned.apk'
+            $apkOut = Join-Path $out 'GDScript-Lab-v1.0.0.apk'
+            $aabOut = Join-Path $out 'GDScript-Lab-v1.0.0.aab'
+            & (Join-Path $bt 'zipalign.exe') -f -p 4 $unsignedApk.FullName $aligned
+            if ($LASTEXITCODE -ne 0) { throw 'zipalign failed' }
+            & (Join-Path $bt 'apksigner.bat') sign --ks $ks --ks-key-alias $env:ANDROID_KEY_ALIAS --ks-pass "pass:$env:ANDROID_STORE_PASSWORD" --key-pass "pass:$env:ANDROID_KEY_PASSWORD" --out $apkOut $aligned
+            if ($LASTEXITCODE -ne 0) { throw 'APK signing failed' }
+            Remove-Item $aligned -Force
+            Copy-Item $aab.FullName $aabOut -Force
+            & jarsigner -keystore $ks -storepass $env:ANDROID_STORE_PASSWORD -keypass $env:ANDROID_KEY_PASSWORD -sigalg SHA256withRSA -digestalg SHA-256 $aabOut $env:ANDROID_KEY_ALIAS
+            if ($LASTEXITCODE -ne 0) { throw 'AAB signing failed' }
+            & (Join-Path $bt 'apksigner.bat') verify --verbose --print-certs $apkOut | Tee-Object -FilePath (Join-Path $out 'APK_SIGNATURE_VERIFICATION.txt')
+            if ($LASTEXITCODE -ne 0) { throw 'APK signature verification failed' }
+            & jarsigner -verify -verbose -certs $aabOut 2>&1 | Tee-Object -FilePath (Join-Path $out 'AAB_SIGNATURE_VERIFICATION.txt')
+            if ($LASTEXITCODE -ne 0) { throw 'AAB signature verification failed' }
+            $certLine = (& (Join-Path $bt 'apksigner.bat') verify --print-certs $apkOut | Select-String 'Signer #1 certificate SHA-256 digest:' | Select-Object -First 1).Line
+            $cert = ($certLine -replace '^.*digest:\s*','').Trim()
+            @("SIGNED=true", "Certificate SHA-256: $cert", 'Private keystore supplied only from GitHub Actions secrets; no private signing material is uploaded.') | Set-Content (Join-Path $out 'ANDROID_RELEASE_IDENTITY.txt')
+            Remove-Item $ks -Force
+          } else {
+            Copy-Item $unsignedApk.FullName (Join-Path $out 'GDScript-Lab-v1.0.0-UNSIGNED.apk') -Force
+            Copy-Item $aab.FullName (Join-Path $out 'GDScript-Lab-v1.0.0-UNSIGNED.aab') -Force
+            @('SIGNED=false','Production signing secrets are not configured.','Required: ANDROID_KEYSTORE_BASE64, ANDROID_KEY_ALIAS, ANDROID_KEY_PASSWORD, ANDROID_STORE_PASSWORD.') | Set-Content (Join-Path $out 'ANDROID_RELEASE_IDENTITY.txt')
+          }
+          Get-ChildItem $out -File | Where-Object { $_.Extension -in '.apk','.aab' } | ForEach-Object { "{0}  {1}" -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(), $_.Name } | Set-Content (Join-Path $out 'SHA256SUMS.txt')
+
+      - name: Upload Android release outputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: GDScript-Lab-v1.0.0-Android-production-safe
+          path: ${{ runner.temp }}/android-release/**
+          if-no-files-found: error
+          retention-days: 90
