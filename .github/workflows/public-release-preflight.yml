@@ -8,11 +8,12 @@ on:
   workflow_dispatch:
 
 permissions:
+  actions: read
   contents: read
 
 env:
-  SOURCE_RELEASE_ID: '381613504'
-  SOURCE_ASSET_ID: '541844727'
+  SOURCE_RUN_ID: '33644641089'
+  SOURCE_ARTIFACT_NAME: GDScript-Lab-v1.0.0-CORRECTED-source
   SOURCE_ZIP: GDScript_Lab_v1.0.0_CORRECTED_NATIVE_SOURCE.zip
   SOURCE_ZIP_SHA256: dc39f130eb650c08d5b8a3bea1b7a0ef392598fe98dd2af218734db24f2af4e4
   PROJECT_DIR: GDScript_Lab_Tauri_v1.0.0
@@ -28,29 +29,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Prove durable private draft source retrieval
-        env:
-          GH_TOKEN: ${{ github.token }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          gh api "/repos/$GITHUB_REPOSITORY/releases/$SOURCE_RELEASE_ID" > "$RUNNER_TEMP/SOURCE_RELEASE.json"
-          python - "$RUNNER_TEMP/SOURCE_RELEASE.json" <<'PY'
-          import json,os,sys
-          d=json.load(open(sys.argv[1]))
-          assert d['draft'] is True
-          assets={str(x['id']):x['name'] for x in d.get('assets',[])}
-          aid=os.environ['SOURCE_ASSET_ID']
-          assert assets.get(aid)=='GDScript_Lab_v1.0.0_CORRECTED_NATIVE_SOURCE.zip', assets
-          print('PASS: durable private draft source release and immutable source asset ID resolved.')
-          PY
-          curl -fL --retry 3 \
-            -H "Authorization: Bearer $GH_TOKEN" \
-            -H 'Accept: application/octet-stream' \
-            -H 'X-GitHub-Api-Version: 2022-11-28' \
-            "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/assets/$SOURCE_ASSET_ID" \
-            -o "$SOURCE_ZIP"
-          test -s "$SOURCE_ZIP"
+      - name: Download proven corrected-source artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.SOURCE_ARTIFACT_NAME }}
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ env.SOURCE_RUN_ID }}
 
       - uses: actions/setup-python@v5
         with:
@@ -60,6 +45,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          test -f "$SOURCE_ZIP"
           test "$(sha256sum "$SOURCE_ZIP" | awk '{print $1}')" = "$SOURCE_ZIP_SHA256"
           python -m zipfile -e "$SOURCE_ZIP" .
           test "$(sha256sum "$PROJECT_DIR/src/index.html" | awk '{print $1}')" = "$EXPECTED_FRONTEND_SHA256"
@@ -190,11 +176,12 @@ jobs:
           set -euo pipefail
           cat > "$RUNNER_TEMP/PUBLIC_RELEASE_PREFLIGHT.txt" <<EOF
           GDScript Lab v1.0.0 public release preflight
+          Corrected-source Actions run: ${SOURCE_RUN_ID}
+          Corrected-source artifact: ${SOURCE_ARTIFACT_NAME}
           Source ZIP SHA-256: ${SOURCE_ZIP_SHA256}
           Frontend SHA-256: ${EXPECTED_FRONTEND_SHA256}
           Portable SHA-256: ${EXPECTED_PORTABLE_SHA256}
           COURSE_DATA SHA-256: ${EXPECTED_COURSE_SHA256}
-          Durable private draft source retrieval: PASS
           First-party source audit: PASS
           Locked npm install: PASS
           Locked Cargo metadata: PASS
@@ -212,7 +199,6 @@ jobs:
           if-no-files-found: error
           retention-days: 90
           path: |
-            ${{ runner.temp }}/SOURCE_RELEASE.json
             ${{ runner.temp }}/SOURCE_AUDIT.txt
             ${{ runner.temp }}/CARGO_METADATA.json
             ${{ runner.temp }}/TAURI_CLI_VERSION.txt
