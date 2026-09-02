@@ -1,0 +1,94 @@
+name: GDScript Lab corrected Linux fallback
+
+on:
+  push:
+    branches: [uiux-native-final-run-20260902]
+    paths:
+      - '.github/workflows/final-corrected-linux-fast.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  SOURCE_RUN_ID: '33644641089'
+  PROJECT_DIR: GDScript_Lab_Tauri_v1.0.0
+  EXPECTED_FRONTEND_SHA256: 628151d40b067f8ab55da80030862720d319d07f69d62d5b532bfd0fdc311336
+  EXPECTED_PORTABLE_SHA256: e9961e8ed86526cff1a51725dd013c4370a159754642f3c6628779202095108d
+  EXPECTED_TAURI_CONF_SHA256: 34b6a822c11d94c0048565ff607917a9e3d653921386ba66651bab8cb41587c0
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: GDScript-Lab-v1.0.0-CORRECTED-source
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ env.SOURCE_RUN_ID }}
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.13' }
+      - name: Verify source
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m zipfile -e GDScript_Lab_v1.0.0_CORRECTED_NATIVE_SOURCE.zip .
+          test "$(sha256sum "$PROJECT_DIR/src/index.html" | awk '{print $1}')" = "$EXPECTED_FRONTEND_SHA256"
+          test "$(sha256sum "$PROJECT_DIR/portable/GDScript_Lab_Godot47_v1.0.0.html" | awk '{print $1}')" = "$EXPECTED_PORTABLE_SHA256"
+          test "$(sha256sum "$PROJECT_DIR/src-tauri/tauri.conf.json" | awk '{print $1}')" = "$EXPECTED_TAURI_CONF_SHA256"
+          cd "$PROJECT_DIR"
+          python scripts/no_unicode_dashes_check.py
+          python scripts/audit.py
+      - name: Install Linux prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          timeout 300 sudo apt-get update
+          timeout 300 sudo -E apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf xdg-utils xvfb
+      - uses: actions/setup-node@v4
+        with: { node-version: '22.16.0' }
+      - uses: dtolnay/rust-toolchain@master
+        with: { toolchain: '1.98.0' }
+      - uses: swatinem/rust-cache@v2
+        with: { workspaces: './GDScript_Lab_Tauri_v1.0.0/src-tauri -> target' }
+      - name: Build AppImage and DEB
+        working-directory: GDScript_Lab_Tauri_v1.0.0
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run icons
+          python scripts/audit.py
+          cargo metadata --locked --format-version 1 --manifest-path src-tauri/Cargo.toml >/dev/null
+          npm run tauri -- build --bundles appimage,deb
+      - name: GUI smoke
+        working-directory: GDScript_Lab_Tauri_v1.0.0
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP="$(find src-tauri/target -type f -name '*.AppImage' -print -quit)"; test -n "$APP"; chmod +x "$APP"
+          set +e
+          xvfb-run -a env APPIMAGE_EXTRACT_AND_RUN=1 "$APP" > "$RUNNER_TEMP/linux-smoke.log" 2>&1 & PID=$!
+          sleep 10
+          if kill -0 "$PID" 2>/dev/null; then kill "$PID" || true; wait "$PID" || true; printf '%s\n' 'PASS: Linux GUI smoke from corrected source.' > "$RUNNER_TEMP/GUI_EVIDENCE.txt"; exit 0; fi
+          wait "$PID"; C=$?; cat "$RUNNER_TEMP/linux-smoke.log" || true; exit "$C"
+      - name: Stage
+        working-directory: GDScript_Lab_Tauri_v1.0.0
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="$RUNNER_TEMP/release"; mkdir -p "$OUT"
+          cp "$(find src-tauri/target -type f -name '*.AppImage' -print -quit)" "$OUT/GDScript_Lab_v1.0.0_Linux_x64.AppImage"
+          cp "$(find src-tauri/target -type f -name '*.deb' -print -quit)" "$OUT/GDScript_Lab_v1.0.0_Linux_x64.deb"
+          cp "$RUNNER_TEMP/GUI_EVIDENCE.txt" "$OUT/GUI_EVIDENCE.txt"
+          sha256sum "$OUT"/* > "$OUT/SHA256SUMS.txt"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GDScript-Lab-v1.0.0-FINAL-Linux-fallback
+          path: ${{ runner.temp }}/release/**
+          if-no-files-found: error
+          retention-days: 90
