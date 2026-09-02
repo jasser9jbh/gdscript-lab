@@ -1,0 +1,97 @@
+name: Final hardened source lockfiles
+
+on:
+  push:
+    branches:
+      - uiux-native-final-run-20260902
+    paths:
+      - '.github/workflows/final-lockfiles.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  lockfiles:
+    name: Resolve exact Node and Rust lockfiles
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.16.0'
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.98.0'
+      - name: Download exact hardened source artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          curl --fail --location \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/9830042661/zip" \
+            -o hardened-artifact.zip
+          mkdir hardened-wrap hardened-source
+          unzip -q hardened-artifact.zip -d hardened-wrap
+          unzip -q hardened-wrap/GDScript_Lab_v1.0.0_FINAL_HARDENED_SOURCE.zip -d hardened-source
+          test -f hardened-source/GDScript_Lab_Tauri_v1.0.0/src/index.html
+      - name: Resolve and verify exact locks
+        working-directory: hardened-source/GDScript_Lab_Tauri_v1.0.0
+        run: |
+          set -euo pipefail
+          npm install --package-lock-only --ignore-scripts
+          npm ci --ignore-scripts
+          cargo generate-lockfile --manifest-path src-tauri/Cargo.toml
+          cargo metadata --locked --manifest-path src-tauri/Cargo.toml --format-version 1 > cargo-metadata.json
+          test -s package-lock.json
+          test -s src-tauri/Cargo.lock
+      - name: Generate matching Rust dependency inventory
+        working-directory: hardened-source/GDScript_Lab_Tauri_v1.0.0
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          data=json.loads(Path('cargo-metadata.json').read_text())
+          packages=[]
+          for p in sorted(data['packages'], key=lambda x:(x['name'].lower(),x['version'])):
+              if p['name']=='gdscript-lab':
+                  continue
+              packages.append({
+                  'name':p['name'],
+                  'version':p['version'],
+                  'license':p.get('license') or 'UNKNOWN',
+                  'repository':p.get('repository') or '',
+                  'source':p.get('source') or ''
+              })
+          Path('RUST_DEPENDENCY_LICENSES.json').write_text(json.dumps({
+              'generated_from':'src-tauri/Cargo.lock',
+              'cargo_metadata_format':1,
+              'package_count':len(packages),
+              'packages':packages
+          },indent=2)+'\n')
+          lines=['# Third-party Rust dependencies','','Generated from the exact `src-tauri/Cargo.lock` resolved for the hardened v1.0.0 source.','',f'Total third-party packages: **{len(packages)}**.','', '| Package | Version | License |','|---|---:|---|']
+          for p in packages:
+              lic=p['license'].replace('|','\\|')
+              lines.append(f"| {p['name']} | {p['version']} | {lic} |")
+          Path('THIRD_PARTY_RUST_DEPENDENCIES.md').write_text('\n'.join(lines)+'\n')
+          PY
+          rm cargo-metadata.json
+      - name: Package reproducibility additions
+        working-directory: hardened-source/GDScript_Lab_Tauri_v1.0.0
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/final-locks/src-tauri
+          cp package-lock.json /tmp/final-locks/package-lock.json
+          cp src-tauri/Cargo.lock /tmp/final-locks/src-tauri/Cargo.lock
+          cp RUST_DEPENDENCY_LICENSES.json /tmp/final-locks/RUST_DEPENDENCY_LICENSES.json
+          cp THIRD_PARTY_RUST_DEPENDENCIES.md /tmp/final-locks/THIRD_PARTY_RUST_DEPENDENCIES.md
+          (cd /tmp/final-locks && sha256sum package-lock.json src-tauri/Cargo.lock RUST_DEPENDENCY_LICENSES.json THIRD_PARTY_RUST_DEPENDENCIES.md > LOCKFILE_SHA256SUMS.txt)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GDScript-Lab-v1.0.0-FINAL-lockfiles
+          path: /tmp/final-locks
+          if-no-files-found: error
