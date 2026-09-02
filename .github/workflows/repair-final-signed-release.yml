@@ -1,0 +1,125 @@
+name: Repair final signed release workflow
+
+on:
+  push:
+    branches: [release/public-preflight-20260902]
+    paths:
+      - '.github/workflows/repair-final-signed-release.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: release/public-preflight-20260902
+      - name: Apply verified final-release pipeline hardening
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('.github/workflows/final-signed-release.yml')
+          s=p.read_text('utf-8')
+
+          old_env='''  SOURCE_ARCHIVE_TAG: v1.0.0-corrected-source-archive\n  SOURCE_ZIP: GDScript_Lab_v1.0.0_CORRECTED_NATIVE_SOURCE.zip\n  SOURCE_ZIP_SHA256: dc39f130eb650c08d5b8a3bea1b7a0ef392598fe98dd2af218734db24f2af4e4\n'''
+          new_env='''  SOURCE_RUN_ID: '33692246998'\n  SOURCE_ARTIFACT_NAME: GDScript-Lab-v1.0.0-PRODUCTION-source\n  SOURCE_ZIP: GDScript_Lab_v1.0.0_PRODUCTION_SOURCE.zip\n  SOURCE_ZIP_SHA256: 53dd49b8b9ab98de0dd240c6ef31862cd2d04298ed33b7a57562f81269a8f3aa\n  PREFLIGHT_RUN_ID: '33692316184'\n  PREFLIGHT_ARTIFACT_NAME: GDScript-Lab-v1.0.0-PUBLIC-RELEASE-PREFLIGHT\n'''
+          assert old_env in s
+          s=s.replace(old_env,new_env,1)
+
+          old_bash='''      - name: Download durable verified source archive\n        env:\n          GH_TOKEN: ${{ github.token }}\n        run: gh release download "$SOURCE_ARCHIVE_TAG" --repo "$GITHUB_REPOSITORY" --pattern "$SOURCE_ZIP"\n'''
+          new_bash='''      - name: Download normalized production source artifact\n        uses: actions/download-artifact@v4\n        with:\n          name: ${{ env.SOURCE_ARTIFACT_NAME }}\n          github-token: ${{ github.token }}\n          repository: ${{ github.repository }}\n          run-id: ${{ env.SOURCE_RUN_ID }}\n          path: production-source-artifact\n      - name: Resolve normalized production source ZIP\n        shell: bash\n        run: |\n          set -euo pipefail\n          FOUND="$(find production-source-artifact -type f -name "$SOURCE_ZIP" -print -quit)"\n          test -n "$FOUND"\n          cp "$FOUND" "$SOURCE_ZIP"\n'''
+          bash_count=s.count(old_bash)
+          assert bash_count==5, f'expected 5 bash source blocks, got {bash_count}'
+          s=s.replace(old_bash,new_bash)
+
+          old_pwsh='''      - name: Download durable verified source archive\n        shell: pwsh\n        env:\n          GH_TOKEN: ${{ github.token }}\n        run: gh release download $env:SOURCE_ARCHIVE_TAG --repo $env:GITHUB_REPOSITORY --pattern $env:SOURCE_ZIP\n'''
+          new_pwsh='''      - name: Download normalized production source artifact\n        uses: actions/download-artifact@v4\n        with:\n          name: ${{ env.SOURCE_ARTIFACT_NAME }}\n          github-token: ${{ github.token }}\n          repository: ${{ github.repository }}\n          run-id: ${{ env.SOURCE_RUN_ID }}\n          path: production-source-artifact\n      - name: Resolve normalized production source ZIP\n        shell: pwsh\n        run: |\n          $found=Get-ChildItem production-source-artifact -Recurse -File -Filter $env:SOURCE_ZIP | Select-Object -First 1\n          if (-not $found) { throw 'Normalized production source ZIP not found in artifact' }\n          Copy-Item $found.FullName $env:SOURCE_ZIP\n'''
+          assert s.count(old_pwsh)==1
+          s=s.replace(old_pwsh,new_pwsh,1)
+
+          old_matrix='''          - { arch: Apple-Silicon, target: aarch64-apple-darwin }\n          - { arch: Intel, target: x86_64-apple-darwin }\n    runs-on: macos-latest\n'''
+          new_matrix='''          - { arch: Apple-Silicon, target: aarch64-apple-darwin, os: macos-15 }\n          - { arch: Intel, target: x86_64-apple-darwin, os: macos-15-intel }\n    runs-on: ${{ matrix.os }}\n'''
+          assert old_matrix in s
+          s=s.replace(old_matrix,new_matrix,1)
+
+          old_win='''          $app=Get-ChildItem src-tauri/target -Recurse -File -Filter gdscript-lab.exe | Where-Object { $_.FullName -match '\\\\release\\\\gdscript-lab\\.exe$' } | Select-Object -First 1\n          $p=Start-Process $app.FullName -PassThru; Start-Sleep 10\n'''
+          new_win='''          $app=Get-ChildItem src-tauri/target -Recurse -File -Filter gdscript-lab.exe | Where-Object { $_.FullName -match '\\\\release\\\\gdscript-lab\\.exe$' } | Select-Object -First 1\n          if (-not $app) { throw 'Signed application executable not found' }\n          $appSig=Get-AuthenticodeSignature $app.FullName\n          if ($appSig.Status -ne 'Valid') { throw "Authenticode verification failed for application executable: $($appSig.Status)" }\n          $p=Start-Process $app.FullName -PassThru; Start-Sleep 10\n'''
+          assert old_win in s
+          s=s.replace(old_win,new_win,1)
+          old_evidence='''          Get-AuthenticodeSignature "$out\\GDScript-Lab-v1.0.0-Setup.exe","$out\\GDScript-Lab-v1.0.0.msi" | Format-List * | Out-File "$out\\AUTHENTICODE_VERIFICATION.txt"\n'''
+          new_evidence='''          Get-AuthenticodeSignature $app.FullName,"$out\\GDScript-Lab-v1.0.0-Setup.exe","$out\\GDScript-Lab-v1.0.0.msi" | Format-List * | Out-File "$out\\AUTHENTICODE_VERIFICATION.txt"\n'''
+          assert old_evidence in s
+          s=s.replace(old_evidence,new_evidence,1)
+
+          old_mac_validate='''          xcrun stapler validate "$APP"\n          codesign --verify --verbose=2 "$DMG"\n          OUT="$RUNNER_TEMP/macos-final"; mkdir -p "$OUT"\n'''
+          new_mac_validate='''          xcrun stapler validate "$APP"\n          codesign --verify --verbose=2 "$DMG"\n          APP_EXEC="$(find "$APP/Contents/MacOS" -maxdepth 1 -type f -print -quit)"\n          test -n "$APP_EXEC" && test -x "$APP_EXEC"\n          "$APP_EXEC" > "$RUNNER_TEMP/macos-smoke.log" 2>&1 & PID=$!\n          sleep 10\n          if ! kill -0 "$PID" 2>/dev/null; then wait "$PID" || true; cat "$RUNNER_TEMP/macos-smoke.log" || true; exit 1; fi\n          kill "$PID" || true; wait "$PID" || true\n          OUT="$RUNNER_TEMP/macos-final"; mkdir -p "$OUT"\n'''
+          assert old_mac_validate in s
+          s=s.replace(old_mac_validate,new_mac_validate,1)
+          old_mac_evidence='''          xcrun stapler validate "$APP" > "$OUT/NOTARIZATION_STAPLE_VERIFICATION.txt" 2>&1\n          shasum -a 256 "$OUT"/* > "$OUT/SHA256SUMS.txt"\n'''
+          new_mac_evidence='''          xcrun stapler validate "$APP" > "$OUT/NOTARIZATION_STAPLE_VERIFICATION.txt" 2>&1\n          printf '%s\\n' 'PASS: signed/notarized macOS app launched and remained alive for the smoke interval on its native-architecture GitHub runner.' > "$OUT/MACOS_RUNTIME_VERIFICATION.txt"\n          shasum -a 256 "$OUT"/* > "$OUT/SHA256SUMS.txt"\n'''
+          assert old_mac_evidence in s
+          s=s.replace(old_mac_evidence,new_mac_evidence,1)
+
+          old_package_head='''  package:\n    name: Assemble final all-platform signed release\n    needs: [linux, windows, macos, android, ios]\n    runs-on: ubuntu-22.04\n    steps:\n      - uses: actions/download-artifact@v4\n'''
+          new_package_head='''  package:\n    name: Assemble final all-platform verified release\n    needs: [linux, windows, macos, android, ios]\n    runs-on: ubuntu-22.04\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/download-artifact@v4\n'''
+          assert old_package_head in s
+          s=s.replace(old_package_head,new_package_head,1)
+
+          old_assemble='''      - name: Assemble final package\n        shell: bash\n'''
+          new_assemble='''      - name: Download public-release security/license evidence\n        uses: actions/download-artifact@v4\n        with:\n          name: ${{ env.PREFLIGHT_ARTIFACT_NAME }}\n          github-token: ${{ github.token }}\n          repository: ${{ github.repository }}\n          run-id: ${{ env.PREFLIGHT_RUN_ID }}\n          path: preflight-evidence\n      - name: Assemble final package\n        shell: bash\n'''
+          assert old_assemble in s
+          s=s.replace(old_assemble,new_assemble,1)
+
+          old_mkdir='''          mkdir -p "$ROOT/Windows" "$ROOT/Linux" "$ROOT/macOS/Intel" "$ROOT/macOS/Apple-Silicon" "$ROOT/Android" "$ROOT/iOS" "$ROOT/Source"\n'''
+          new_mkdir='''          mkdir -p "$ROOT/Windows" "$ROOT/Linux" "$ROOT/macOS/Intel" "$ROOT/macOS/Apple-Silicon" "$ROOT/Android" "$ROOT/iOS" "$ROOT/Portable" "$ROOT/Documentation"\n'''
+          assert old_mkdir in s
+          s=s.replace(old_mkdir,new_mkdir,1)
+
+          old_source_copy='''          cp "$SOURCE_ZIP" "$ROOT/Source/GDScript-Lab-v1.0.0-source.zip"\n          find artifacts -type f \\( -name '*VERIFICATION.txt' -o -name '*IDENTITY.txt' -o -name '*BADGING.txt' \\) -exec cp {} "$ROOT/" \\;\n'''
+          new_source_copy='''          rm -rf source-public-metadata && mkdir -p source-public-metadata\n          unzip -q "$SOURCE_ZIP" -d source-public-metadata\n          SRCROOT="source-public-metadata/$PROJECT_DIR"\n          test -f "$SRCROOT/LICENSE.txt" && cp "$SRCROOT/LICENSE.txt" "$ROOT/LICENSE.txt"\n          test -f "$SRCROOT/THIRD_PARTY_NOTICES.md" && cp "$SRCROOT/THIRD_PARTY_NOTICES.md" "$ROOT/THIRD_PARTY_NOTICES.md"\n          for f in PRIVACY.md TERMS.md ACCESSIBILITY.md SUPPORT.md README_DISTRIBUTION.md; do test -f "$SRCROOT/$f" && cp "$SRCROOT/$f" "$ROOT/Documentation/$f"; done\n          cp "$SRCROOT/portable/GDScript_Lab_Godot47_v1.0.0.html" "$ROOT/Portable/GDScript_Lab_Godot47_v1.0.0.html"\n          LICENSE_REPORT="$(find preflight-evidence -type f -name THIRD_PARTY_LICENSES.html -print -quit)"\n          PREFLIGHT_REPORT="$(find preflight-evidence -type f -name PUBLIC_RELEASE_PREFLIGHT.txt -print -quit)"\n          test -n "$LICENSE_REPORT" && cp "$LICENSE_REPORT" "$ROOT/THIRD_PARTY_LICENSES.html"\n          test -n "$PREFLIGHT_REPORT" && cp "$PREFLIGHT_REPORT" "$ROOT/Documentation/PUBLIC_RELEASE_PREFLIGHT.txt"\n          test -f SECURITY_RELEASE_REVIEW.md && cp SECURITY_RELEASE_REVIEW.md "$ROOT/Documentation/SECURITY_RELEASE_REVIEW.md"\n          find artifacts -type f \\( -name '*VERIFICATION.txt' -o -name '*IDENTITY.txt' -o -name '*BADGING.txt' \\) -exec cp {} "$ROOT/" \\;\n'''
+          assert old_source_copy in s
+          s=s.replace(old_source_copy,new_source_copy,1)
+
+          s=s.replace('macOS: Developer ID-signed and Apple-notarized/stapled DMGs for Apple Silicon and Intel.',
+                      'macOS: DMGs containing Developer ID-signed, Apple-notarized/stapled apps for Apple Silicon and Intel; native-architecture launch smoke required by CI.')
+          s=s.replace('iOS: Apple-distribution-signed App Store Connect IPA with provisioning identifier verification.',
+                      'iOS: Apple-distribution-signed App Store Connect submission IPA with provisioning identifier verification; this is not a universal direct-download iOS installer.')
+          s=s.replace('          No private signing key, certificate password, provisioning secret, or Apple API private key is included.\n',
+                      '          Portable: self-contained validated HTML edition included for browser/offline use.\n          Proprietary build source: NOT included in the public package.\n          Full third-party license report and security preflight evidence: included.\n\n          No private signing key, certificate password, provisioning secret, or Apple API private key is included.\n')
+          s=s.replace('          Corrected source ZIP SHA-256: ${SOURCE_ZIP_SHA256}\n',
+                      '          Internal production build-source ZIP SHA-256: ${SOURCE_ZIP_SHA256}\n          Internal source artifact run: ${SOURCE_RUN_ID}\n          Security/license preflight run: ${PREFLIGHT_RUN_ID}\n          Public proprietary source archive included: NO\n')
+          s=s.replace('          Release class: FINAL SIGNED CROSS-PLATFORM\n',
+                      '          Release class: FINAL VERIFIED CROSS-PLATFORM\n')
+          s=s.replace("--notes 'Final signed cross-platform package produced only after all platform signing and verification jobs passed. Review the attached manifest/checksums before publishing this draft release.' --draft",
+                      "--notes 'Final verified cross-platform package produced only after all required platform signing, notarization/provisioning, runtime, security and license gates passed. The iOS IPA is an App Store Connect submission artifact rather than a universal direct-download installer. Review the attached manifest/checksums before publishing this draft release.' --draft")
+
+          # Old private-draft source retrieval must be completely gone.
+          assert 'SOURCE_ARCHIVE_TAG' not in s
+          assert 'gh release download' not in s
+          assert 'GDScript_Lab_v1.0.0_CORRECTED_NATIVE_SOURCE.zip' not in s
+          assert 'GDScript_Lab_v1.0.0_PRODUCTION_SOURCE.zip' in s
+          assert 'THIRD_PARTY_LICENSES.html' in s
+          assert 'Public proprietary source archive included: NO' in s
+          p.write_text(s,'utf-8')
+          PY
+          python - <<'PY'
+          import yaml
+          p='.github/workflows/final-signed-release.yml'
+          with open(p,encoding='utf-8') as f: yaml.safe_load(f)
+          print('PASS: final-signed-release.yml parses as YAML')
+          PY
+          grep -nE 'SOURCE_RUN_ID|PRODUCTION_SOURCE|macos-15-intel|MACOS_RUNTIME|THIRD_PARTY_LICENSES|Public proprietary source|FINAL VERIFIED' .github/workflows/final-signed-release.yml
+      - name: Commit repaired workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add .github/workflows/final-signed-release.yml
+          git commit -m 'Harden final public release pipeline'
+          git push origin HEAD:release/public-preflight-20260902
