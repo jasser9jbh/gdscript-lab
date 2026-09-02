@@ -1,0 +1,86 @@
+name: Archive verified v1.0.0 corrected source
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/archive-verified-source.yml'
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: write
+
+env:
+  SOURCE_RUN_ID: '33644641089'
+  SOURCE_ARTIFACT_NAME: GDScript-Lab-v1.0.0-CORRECTED-source
+  SOURCE_ZIP: GDScript_Lab_v1.0.0_CORRECTED_NATIVE_SOURCE.zip
+  SOURCE_ZIP_SHA256: dc39f130eb650c08d5b8a3bea1b7a0ef392598fe98dd2af218734db24f2af4e4
+  ARCHIVE_TAG: v1.0.0-corrected-source-archive
+  EXPECTED_FRONTEND_SHA256: 628151d40b067f8ab55da80030862720d319d07f69d62d5b532bfd0fdc311336
+  EXPECTED_PORTABLE_SHA256: e9961e8ed86526cff1a51725dd013c4370a159754642f3c6628779202095108d
+  EXPECTED_COURSE_SHA256: c0a663fb0cf5cf8876e3279e70d5783d245a615cbf6238cf82a1ad67e1408abe
+
+jobs:
+  archive:
+    name: Verify and archive corrected source
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.SOURCE_ARTIFACT_NAME }}
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ env.SOURCE_RUN_ID }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Verify immutable source package
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f "$SOURCE_ZIP"
+          ACTUAL="$(sha256sum "$SOURCE_ZIP" | awk '{print $1}')"
+          echo "Corrected source ZIP SHA-256: $ACTUAL"
+          test "$ACTUAL" = "$SOURCE_ZIP_SHA256"
+          rm -rf verify && mkdir verify
+          python -m zipfile -e "$SOURCE_ZIP" verify
+          PROJECT=verify/GDScript_Lab_Tauri_v1.0.0
+          test "$(sha256sum "$PROJECT/src/index.html" | awk '{print $1}')" = "$EXPECTED_FRONTEND_SHA256"
+          test "$(sha256sum "$PROJECT/portable/GDScript_Lab_Godot47_v1.0.0.html" | awk '{print $1}')" = "$EXPECTED_PORTABLE_SHA256"
+          cd "$PROJECT"
+          python scripts/no_unicode_dashes_check.py
+          python scripts/audit.py | tee "$RUNNER_TEMP/SOURCE_AUDIT.txt"
+          grep -q "$EXPECTED_COURSE_SHA256" "$RUNNER_TEMP/SOURCE_AUDIT.txt"
+      - name: Write archive manifest
+        shell: bash
+        run: |
+          cat > SOURCE_ARCHIVE_MANIFEST.txt <<EOF
+          Product: GDScript Lab
+          Version: 1.0.0
+          Purpose: durable private draft-release archive of the verified corrected release source
+          Source Actions run: ${SOURCE_RUN_ID}
+          Source artifact: ${SOURCE_ARTIFACT_NAME}
+          Source ZIP SHA-256: ${SOURCE_ZIP_SHA256}
+          Frontend SHA-256: ${EXPECTED_FRONTEND_SHA256}
+          Portable SHA-256: ${EXPECTED_PORTABLE_SHA256}
+          COURSE_DATA SHA-256: ${EXPECTED_COURSE_SHA256}
+          Private signing material included: NO
+          EOF
+          sha256sum "$SOURCE_ZIP" > "$SOURCE_ZIP.sha256"
+      - name: Create or refresh draft source archive release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$ARCHIVE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$ARCHIVE_TAG" "$SOURCE_ZIP" "$SOURCE_ZIP.sha256" SOURCE_ARCHIVE_MANIFEST.txt --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$ARCHIVE_TAG" "$SOURCE_ZIP" "$SOURCE_ZIP.sha256" SOURCE_ARCHIVE_MANIFEST.txt \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title 'GDScript Lab v1.0.0 verified corrected source archive' \
+              --notes 'Private draft release used as durable CI source storage for the verified v1.0.0 corrected source. This is not the public product release and contains no signing secrets.' \
+              --draft
+          fi
