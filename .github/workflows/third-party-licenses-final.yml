@@ -64,19 +64,48 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # The app itself is proprietary and not a crates.io package. Mark only the
+          # extracted CI copy private so cargo-about reports third-party dependencies.
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('Cargo.toml')
+          s=p.read_text()
+          if 'publish = false' not in s:
+              s=s.replace('license-file = "../LICENSE.txt"\n', 'license-file = "../LICENSE.txt"\npublish = false\n', 1)
+          p.write_text(s)
+          PY
+
           cargo about init
           python - <<'PY'
           from pathlib import Path
           p=Path('about.toml')
           s=p.read_text()
-          # MPL-2.0 is used by dependencies in the locked graph and is not in cargo-about's default accepted list.
-          if '"MPL-2.0"' not in s:
-              s=s.replace('accepted = [', 'accepted = [\n    "MPL-2.0",', 1)
+          # Accept only SPDX licenses/exceptions actually present in the preserved
+          # 485-package locked dependency inventory. OR-expressions can still resolve
+          # through these accepted alternatives; no blanket/unlicensed allowance is used.
+          accepted = [
+              'Apache-2.0',
+              'MIT',
+              'BSD-3-Clause',
+              'Zlib',
+              'Unicode-3.0',
+              'MPL-2.0',
+              'ISC',
+              'Apache-2.0 WITH LLVM-exception',
+          ]
+          start=s.index('accepted = [')
+          end=s.index(']', start)
+          block='accepted = [\n' + ''.join(f'    "{x}",\n' for x in accepted) + ']'
+          s=s[:start] + block + s[end+1:]
+          if '[private]' not in s:
+              s += '\n[private]\nignore = true\n'
           p.write_text(s)
+
           h=Path('about.hbs')
           hs=h.read_text().replace('projects used in cargo-about', 'third-party projects used in GDScript Lab')
           h.write_text(hs)
           PY
+
           cargo about generate -o "$GITHUB_WORKSPACE/THIRD_PARTY_LICENSES.html" about.hbs
           test -s "$GITHUB_WORKSPACE/THIRD_PARTY_LICENSES.html"
           grep -qi 'Third Party Licenses' "$GITHUB_WORKSPACE/THIRD_PARTY_LICENSES.html"
