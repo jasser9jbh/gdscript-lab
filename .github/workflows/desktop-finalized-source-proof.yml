@@ -12,10 +12,10 @@ permissions:
   actions: read
 
 env:
-  SOURCE_RUN_ID: '33795848691'
-  SOURCE_ARTIFACT_NAME: GDScript-Lab-v1.0.0-PRODUCTION-FINALIZED-SOURCE
+  SOURCE_RUN_ID: '33799971760'
+  SOURCE_ARTIFACT_NAME: GDScript-Lab-v1.0.0-PRODUCTION-FINALIZED-SOURCE-V2
   SOURCE_ZIP: GDScript_Lab_v1.0.0_PRODUCTION_FINALIZED_SOURCE.zip
-  SOURCE_ZIP_SHA256: c418540f7ef9a00783b44751d3316e37a57e1c486fb071c0136d0fca5d7b1527
+  SOURCE_ZIP_SHA256: 615412cd34c93c18d622e18a8d474b8c53ad565afac1a57b18f5db22c893d9b4
   PROJECT_DIR: GDScript_Lab_Tauri_v1.0.0
   EXPECTED_FRONTEND_SHA256: 628151d40b067f8ab55da80030862720d319d07f69d62d5b532bfd0fdc311336
   EXPECTED_PORTABLE_SHA256: e9961e8ed86526cff1a51725dd013c4370a159754642f3c6628779202095108d
@@ -25,10 +25,10 @@ env:
 
 jobs:
   linux:
-    name: Linux x64 finalized-source build + runtime
+    name: Linux x64 authoritative-source build + runtime
     runs-on: ubuntu-22.04
     steps:
-      - name: Download finalized source
+      - name: Download authoritative source
         uses: actions/download-artifact@v4
         with:
           name: ${{ env.SOURCE_ARTIFACT_NAME }}
@@ -51,6 +51,12 @@ jobs:
           cd "$PROJECT_DIR"
           python scripts/audit.py | tee "$RUNNER_TEMP/SOURCE_AUDIT.txt"
           grep -q "$EXPECTED_COURSE_SHA256" "$RUNNER_TEMP/SOURCE_AUDIT.txt"
+          python - <<'PY'
+          import json
+          m=json.load(open('BUILD_MANIFEST.json',encoding='utf-8'))
+          assert m['pinned_toolchain']['android_ndk']=='29.0.14206865'
+          assert m['toolchains']['android_ndk']=='29.0.14206865'
+          PY
       - name: Install Linux prerequisites
         run: |
           sudo apt-get -o Acquire::Retries=3 update
@@ -85,20 +91,20 @@ jobs:
           cp "$APP" "$OUT/GDScript-Lab-v1.0.0.AppImage"
           cp "$DEB" "$OUT/GDScript-Lab-v1.0.0.deb"
           cp "$RUNNER_TEMP/SOURCE_AUDIT.txt" "$OUT/SOURCE_AUDIT.txt"
-          printf '%s\n' 'PASS: finalized-source Linux AppImage launched under Xvfb.' > "$OUT/LINUX_RUNTIME_VERIFICATION.txt"
+          printf '%s\n' 'PASS: authoritative-source Linux AppImage launched under Xvfb.' > "$OUT/LINUX_RUNTIME_VERIFICATION.txt"
           sha256sum "$OUT"/* > "$OUT/SHA256SUMS.txt"
       - uses: actions/upload-artifact@v4
         with:
-          name: GDScript-Lab-v1.0.0-FINALIZED-Linux-x64
+          name: GDScript-Lab-v1.0.0-AUTHORITATIVE-Linux-x64
           path: ${{ runner.temp }}/linux-finalized/**
           if-no-files-found: error
           retention-days: 90
 
   windows:
-    name: Windows x64 finalized-source build + runtime
+    name: Windows x64 authoritative-source build + runtime
     runs-on: windows-latest
     steps:
-      - name: Download finalized source
+      - name: Download authoritative source
         uses: actions/download-artifact@v4
         with:
           name: ${{ env.SOURCE_ARTIFACT_NAME }}
@@ -112,7 +118,7 @@ jobs:
         shell: pwsh
         run: |
           $found=Get-ChildItem source-artifact -Recurse -File -Filter $env:SOURCE_ZIP | Select-Object -First 1
-          if (-not $found) { throw 'Finalized source ZIP not found' }
+          if (-not $found) { throw 'Authoritative source ZIP not found' }
           $actual=(Get-FileHash $found.FullName -Algorithm SHA256).Hash.ToLower()
           if ($actual -ne $env:SOURCE_ZIP_SHA256) { throw "Source ZIP hash mismatch: $actual" }
           python -m zipfile -e $found.FullName .
@@ -121,6 +127,8 @@ jobs:
           Push-Location $env:PROJECT_DIR
           python scripts/audit.py | Tee-Object -FilePath "$env:RUNNER_TEMP/SOURCE_AUDIT.txt"
           if (-not (Select-String -Path "$env:RUNNER_TEMP/SOURCE_AUDIT.txt" -Pattern $env:EXPECTED_COURSE_SHA256 -Quiet)) { throw 'Course hash missing' }
+          $m=Get-Content BUILD_MANIFEST.json -Raw | ConvertFrom-Json
+          if ($m.pinned_toolchain.android_ndk -ne '29.0.14206865' -or $m.toolchains.android_ndk -ne '29.0.14206865') { throw 'NDK manifest mismatch' }
           Pop-Location
       - uses: actions/setup-node@v4
         with:
@@ -150,17 +158,17 @@ jobs:
           Copy-Item $setup.FullName "$out\GDScript-Lab-v1.0.0-Setup.exe"
           Copy-Item $msi.FullName "$out\GDScript-Lab-v1.0.0.msi"
           Copy-Item "$env:RUNNER_TEMP\SOURCE_AUDIT.txt" "$out\SOURCE_AUDIT.txt"
-          'PASS: finalized-source Windows executable launched and remained alive for the smoke interval.' | Set-Content "$out\WINDOWS_RUNTIME_VERIFICATION.txt"
+          'PASS: authoritative-source Windows executable launched and remained alive for the smoke interval.' | Set-Content "$out\WINDOWS_RUNTIME_VERIFICATION.txt"
           Get-ChildItem $out -File | Get-FileHash -Algorithm SHA256 | ForEach-Object { "$($_.Hash.ToLower())  $([IO.Path]::GetFileName($_.Path))" } | Set-Content "$out\SHA256SUMS.txt"
       - uses: actions/upload-artifact@v4
         with:
-          name: GDScript-Lab-v1.0.0-FINALIZED-Windows-x64
+          name: GDScript-Lab-v1.0.0-AUTHORITATIVE-Windows-x64
           path: ${{ runner.temp }}/windows-finalized/**
           if-no-files-found: error
           retention-days: 90
 
   macos:
-    name: macOS ${{ matrix.arch }} finalized-source build + runtime
+    name: macOS ${{ matrix.arch }} authoritative-source build + runtime
     strategy:
       fail-fast: false
       matrix:
@@ -169,7 +177,7 @@ jobs:
           - { arch: Intel, target: x86_64-apple-darwin, os: macos-15-intel }
     runs-on: ${{ matrix.os }}
     steps:
-      - name: Download finalized source
+      - name: Download authoritative source
         uses: actions/download-artifact@v4
         with:
           name: ${{ env.SOURCE_ARTIFACT_NAME }}
@@ -192,6 +200,12 @@ jobs:
           cd "$PROJECT_DIR"
           python scripts/audit.py | tee "$RUNNER_TEMP/SOURCE_AUDIT.txt"
           grep -q "$EXPECTED_COURSE_SHA256" "$RUNNER_TEMP/SOURCE_AUDIT.txt"
+          python - <<'PY'
+          import json
+          m=json.load(open('BUILD_MANIFEST.json',encoding='utf-8'))
+          assert m['pinned_toolchain']['android_ndk']=='29.0.14206865'
+          assert m['toolchains']['android_ndk']=='29.0.14206865'
+          PY
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
@@ -222,11 +236,11 @@ jobs:
           OUT="$RUNNER_TEMP/macos-finalized"; mkdir -p "$OUT"
           cp "$DMG" "$OUT/GDScript-Lab-v1.0.0-macOS-${{ matrix.arch }}.dmg"
           cp "$RUNNER_TEMP/SOURCE_AUDIT.txt" "$OUT/SOURCE_AUDIT.txt"
-          printf '%s\n' 'PASS: finalized-source macOS app launched on its native-architecture runner. Developer-ID notarization is a separate publisher-credential gate.' > "$OUT/MACOS_RUNTIME_VERIFICATION.txt"
+          printf '%s\n' 'PASS: authoritative-source macOS app launched on its native-architecture runner. Developer-ID notarization is a separate publisher-credential gate.' > "$OUT/MACOS_RUNTIME_VERIFICATION.txt"
           shasum -a 256 "$OUT"/* > "$OUT/SHA256SUMS.txt"
       - uses: actions/upload-artifact@v4
         with:
-          name: GDScript-Lab-v1.0.0-FINALIZED-macOS-${{ matrix.arch }}
+          name: GDScript-Lab-v1.0.0-AUTHORITATIVE-macOS-${{ matrix.arch }}
           path: ${{ runner.temp }}/macos-finalized/**
           if-no-files-found: error
           retention-days: 90
