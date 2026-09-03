@@ -1,0 +1,33 @@
+name: Temporary export Android Build Tools 36
+
+on:
+  push:
+    paths:
+      - '.github/workflows/export-android-build-tools.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  export-tools:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: android-actions/setup-android@v4
+      - name: Install Build Tools 36
+        shell: bash
+        run: sdkmanager 'build-tools;36.0.0'
+      - name: Stage signing and verification tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/android-build-tools-36"
+          cp -a "$ANDROID_HOME/build-tools/36.0.0/." "$RUNNER_TEMP/android-build-tools-36/"
+          test -x "$RUNNER_TEMP/android-build-tools-36/zipalign"
+          test -x "$RUNNER_TEMP/android-build-tools-36/apksigner"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-build-tools-36-linux
+          path: ${{ runner.temp }}/android-build-tools-36/**
+          if-no-files-found: error
+          retention-days: 1
