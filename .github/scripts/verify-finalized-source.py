@@ -3,11 +3,12 @@ from __future__ import annotations
 import hashlib, json, pathlib, subprocess, sys, zipfile
 
 SOURCE_ZIP = 'GDScript_Lab_v1.0.0_PRODUCTION_FINALIZED_SOURCE.zip'
-SOURCE_SHA256 = 'c418540f7ef9a00783b44751d3316e37a57e1c486fb071c0136d0fca5d7b1527'
+SOURCE_SHA256 = '615412cd34c93c18d622e18a8d474b8c53ad565afac1a57b18f5db22c893d9b4'
 PROJECT_DIR = 'GDScript_Lab_Tauri_v1.0.0'
 FRONTEND_SHA256 = '628151d40b067f8ab55da80030862720d319d07f69d62d5b532bfd0fdc311336'
 PORTABLE_SHA256 = 'e9961e8ed86526cff1a51725dd013c4370a159754642f3c6628779202095108d'
 COURSE_SHA256 = 'c0a663fb0cf5cf8876e3279e70d5783d245a615cbf6238cf82a1ad67e1408abe'
+NDK_VERSION = '29.0.14206865'
 
 def sha(path: pathlib.Path) -> str:
     h = hashlib.sha256()
@@ -50,6 +51,15 @@ def main() -> None:
     for required in ('max-page-size=16384', 'common-page-size=16384'):
         if required not in cargo_cfg:
             raise SystemExit(f'missing Android 16-KB linker policy: {required}')
+    manifest = json.loads((project / 'BUILD_MANIFEST.json').read_text(encoding='utf-8'))
+    if manifest.get('pinned_toolchain', {}).get('android_ndk') != NDK_VERSION:
+        raise SystemExit('BUILD_MANIFEST pinned Android NDK mismatch')
+    if manifest.get('toolchains', {}).get('android_ndk') != NDK_VERSION:
+        raise SystemExit('BUILD_MANIFEST Android toolchain mismatch')
+    if manifest.get('release_finalization', {}).get('android_ndk') != NDK_VERSION:
+        raise SystemExit('BUILD_MANIFEST release-finalization NDK mismatch')
+    if manifest.get('release_finalization', {}).get('android_target_api') != 36:
+        raise SystemExit('BUILD_MANIFEST Android target API mismatch')
     audit = subprocess.run([sys.executable, 'scripts/audit.py'], cwd=project, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     sys.stdout.write(audit.stdout)
     if audit.returncode:
