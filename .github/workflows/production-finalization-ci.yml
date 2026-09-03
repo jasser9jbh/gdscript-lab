@@ -1,0 +1,204 @@
+name: GDScript Lab v1.0.0 production finalization CI
+
+on:
+  push:
+    branches:
+      - release/v1.0.0-production-finalization
+    paths:
+      - '.github/workflows/production-finalization-ci.yml'
+      - '.github/scripts/finalize-v1-source.py'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  SOURCE_RUN_ID: '33692246998'
+  SOURCE_ARTIFACT_NAME: GDScript-Lab-v1.0.0-PRODUCTION-source
+  SOURCE_ZIP: GDScript_Lab_v1.0.0_PRODUCTION_SOURCE.zip
+  SOURCE_ZIP_SHA256: 53dd49b8b9ab98de0dd240c6ef31862cd2d04298ed33b7a57562f81269a8f3aa
+  PROJECT_DIR: GDScript_Lab_Tauri_v1.0.0
+  NODE_VERSION: '22.16.0'
+  RUST_VERSION: '1.98.0'
+  NDK_VERSION: '29.0.14206865'
+
+jobs:
+  finalize-source:
+    name: Finalize exact frozen source
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Download exact normalized production source
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.SOURCE_ARTIFACT_NAME }}
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ env.SOURCE_RUN_ID }}
+          path: production-source-artifact
+      - name: Verify, finalize and re-audit source
+        shell: bash
+        run: |
+          set -euo pipefail
+          FOUND="$(find production-source-artifact -type f -name "$SOURCE_ZIP" -print -quit)"
+          test -n "$FOUND"
+          test "$(sha256sum "$FOUND" | awk '{print $1}')" = "$SOURCE_ZIP_SHA256"
+          python -m zipfile -e "$FOUND" .
+          (cd "$PROJECT_DIR" && python scripts/audit.py)
+          python .github/scripts/finalize-v1-source.py "$PROJECT_DIR"
+          (cd "$PROJECT_DIR" && python scripts/audit.py | tee "$RUNNER_TEMP/FINAL_SOURCE_AUDIT.txt")
+          grep -q 'course_data_sha256 c0a663fb0cf5cf8876e3279e70d5783d245a615cbf6238cf82a1ad67e1408abe' "$RUNNER_TEMP/FINAL_SOURCE_AUDIT.txt"
+          python -m zipfile -c "$RUNNER_TEMP/GDScript_Lab_v1.0.0_PRODUCTION_FINALIZED_SOURCE.zip" "$PROJECT_DIR"
+          sha256sum "$RUNNER_TEMP/GDScript_Lab_v1.0.0_PRODUCTION_FINALIZED_SOURCE.zip" > "$RUNNER_TEMP/SOURCE_SHA256.txt"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GDScript-Lab-v1.0.0-PRODUCTION-FINALIZED-SOURCE
+          path: |
+            ${{ runner.temp }}/GDScript_Lab_v1.0.0_PRODUCTION_FINALIZED_SOURCE.zip
+            ${{ runner.temp }}/SOURCE_SHA256.txt
+            ${{ runner.temp }}/FINAL_SOURCE_AUDIT.txt
+          if-no-files-found: error
+          retention-days: 90
+
+  android-build:
+    name: Finalized Android API 36 / NDK r29 build gate
+    needs: finalize-source
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: GDScript-Lab-v1.0.0-PRODUCTION-FINALIZED-SOURCE
+          path: finalized-source
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.13' }
+      - name: Extract finalized source
+        shell: bash
+        run: python -m zipfile -e finalized-source/GDScript_Lab_v1.0.0_PRODUCTION_FINALIZED_SOURCE.zip .
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: GDScript_Lab_Tauri_v1.0.0/package-lock.json
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v4
+      - name: Install API 36, Build Tools 36 and NDK r29
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdkmanager 'platform-tools' 'platforms;android-36' 'build-tools;36.0.0' "ndk;${NDK_VERSION}"
+          echo "NDK_HOME=$ANDROID_HOME/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './GDScript_Lab_Tauri_v1.0.0/src-tauri -> target'
+      - name: Build APK and AAB and verify 16 KiB ELF/ZIP alignment
+        working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run icons
+          python scripts/audit.py
+          npm run android:init
+          npm run android:apk
+          npm run android:aab
+          APK="$(find src-tauri/gen/android/app/build/outputs -type f -name '*release-unsigned.apk' -print -quit)"
+          AAB="$(find src-tauri/gen/android/app/build/outputs -type f -name '*.aab' -print -quit)"
+          test -n "$APK" && test -n "$AAB"
+          BT="$ANDROID_HOME/build-tools/36.0.0"
+          "$BT/zipalign" -c -P 16 -v 4 "$APK" > "$RUNNER_TEMP/APK_ZIPALIGN_16K.txt"
+          rm -rf "$RUNNER_TEMP/apk-elf"; mkdir -p "$RUNNER_TEMP/apk-elf"
+          unzip -q "$APK" 'lib/*/*.so' -d "$RUNNER_TEMP/apk-elf"
+          READELF="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
+          python - "$READELF" "$RUNNER_TEMP/apk-elf" "$RUNNER_TEMP/APK_ELF_16K.txt" <<'PY'
+          import pathlib,re,subprocess,sys
+          readelf,root,out=sys.argv[1:]
+          rows=[]
+          for so in sorted(pathlib.Path(root).rglob('*.so')):
+              text=subprocess.check_output([readelf,'-lW',str(so)],text=True)
+              align=[int(line.split()[-1],16) for line in text.splitlines() if re.match(r'^\s*LOAD\s',line)]
+              if not align or min(align)<0x4000: raise SystemExit(f'16 KiB ELF FAIL: {so}: {align}')
+              rows.append(f'PASS min_PT_LOAD_align={min(align):#x} {so}')
+          if not rows: raise SystemExit('No native libraries found')
+          pathlib.Path(out).write_text('\n'.join(rows)+'\n')
+          PY
+          OUT="$RUNNER_TEMP/android-finalized"; mkdir -p "$OUT"
+          cp "$APK" "$OUT/GDScript-Lab-v1.0.0-release-unsigned.apk"
+          cp "$AAB" "$OUT/GDScript-Lab-v1.0.0.aab"
+          cp "$RUNNER_TEMP/APK_ZIPALIGN_16K.txt" "$RUNNER_TEMP/APK_ELF_16K.txt" "$OUT/"
+          sha256sum "$OUT"/* > "$OUT/SHA256SUMS.txt"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GDScript-Lab-v1.0.0-FINALIZED-Android-build-proof
+          path: ${{ runner.temp }}/android-finalized/**
+          if-no-files-found: error
+          retention-days: 90
+
+  ios-compile:
+    name: Finalized iOS 15+ compile gate on Xcode 26+
+    needs: finalize-source
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: GDScript-Lab-v1.0.0-PRODUCTION-FINALIZED-SOURCE
+          path: finalized-source
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.13' }
+      - name: Extract finalized source and require Xcode 26 / iOS 26 SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m zipfile -e finalized-source/GDScript_Lab_v1.0.0_PRODUCTION_FINALIZED_SOURCE.zip .
+          xcodebuild -version | tee "$RUNNER_TEMP/XCODE_VERSION.txt"
+          XCODE_MAJOR="$(xcodebuild -version | awk '/Xcode/{split($2,v,"."); print v[1]; exit}')"
+          test -n "$XCODE_MAJOR" && test "$XCODE_MAJOR" -ge 26
+          xcrun --sdk iphoneos --show-sdk-version | tee "$RUNNER_TEMP/IOS_SDK_VERSION.txt"
+          SDK_MAJOR="$(cut -d. -f1 < "$RUNNER_TEMP/IOS_SDK_VERSION.txt")"
+          test "$SDK_MAJOR" -ge 26
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: GDScript_Lab_Tauri_v1.0.0/package-lock.json
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: aarch64-apple-ios,x86_64-apple-ios,aarch64-apple-ios-sim
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './GDScript_Lab_Tauri_v1.0.0/src-tauri -> target'
+      - name: Compile finalized iOS source without distribution signing
+        working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v pod >/dev/null || brew install cocoapods
+          npm ci
+          npm run icons
+          python scripts/audit.py
+          npm run ios:init
+          npm run ios:build
+          printf '%s\n' 'PASS: finalized v1.0.0 source compiled with iOS minimum 15.0 on Xcode 26+ / iOS 26 SDK+ without distribution signing.' > "$RUNNER_TEMP/IOS_FINALIZED_COMPILE_VALIDATION.txt"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GDScript-Lab-v1.0.0-FINALIZED-iOS-compile-proof
+          path: |
+            ${{ runner.temp }}/IOS_FINALIZED_COMPILE_VALIDATION.txt
+            ${{ runner.temp }}/XCODE_VERSION.txt
+            ${{ runner.temp }}/IOS_SDK_VERSION.txt
+          if-no-files-found: error
+          retention-days: 90
