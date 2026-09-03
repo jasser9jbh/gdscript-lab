@@ -84,6 +84,8 @@ def main() -> None:
         if needle not in t: raise SystemExit('Cannot insert linker/CSP audit')
         t=t.replace(needle,extra,1)
     t=t.replace("assert \"ndk;27.2.12479018\" in android_wf",f"assert \"ndk;{NDK}\" in android_wf")
+    if "pinned_toolchain']['android_ndk'" not in t:
+        t += f"\n# Release metadata must agree with the build workflow/toolchain.\n_build_manifest=json.loads(Path('BUILD_MANIFEST.json').read_text('utf-8'))\nassert _build_manifest['pinned_toolchain']['android_ndk']=='{NDK}'\nassert _build_manifest['toolchains']['android_ndk']=='{NDK}'\n"
     audit_p.write_text(t,'utf-8')
 
     readme_p=root/'README_BUILD.md'
@@ -100,6 +102,7 @@ def main() -> None:
     manifest_p=root/'BUILD_MANIFEST.json'
     manifest=json.loads(manifest_p.read_text('utf-8'))
     manifest['manifest_generated_at']='2026-09-03'
+    manifest.setdefault('pinned_toolchain',{})['android_ndk']=NDK
     manifest.setdefault('toolchains',{})['android_ndk']=NDK
     manifest.setdefault('platform_minimums',{})['ios']='15.0'
     manifest['mobile_build_identity']={'android_version_code':1000000,'ios_bundle_version':'1'}
@@ -113,6 +116,11 @@ def main() -> None:
 
     if sha(frontend)!=EXPECTED_FRONTEND or sha(portable)!=EXPECTED_PORTABLE:
         raise SystemExit('Learner payload changed during finalization')
+    # Run the finalized source audit once more so the manifest/toolchain invariant is release-blocking.
+    import subprocess
+    audit=subprocess.run([sys.executable,'scripts/audit.py'],cwd=root)
+    if audit.returncode:
+        raise SystemExit('Finalized source audit failed after production finalization')
     print('PASS: production source finalization complete with frozen learner/course payload')
 
 if __name__=='__main__': main()
