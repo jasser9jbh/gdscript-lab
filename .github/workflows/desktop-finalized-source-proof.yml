@@ -1,0 +1,246 @@
+name: GDScript Lab v1.0.0 finalized desktop source proof
+
+on:
+  push:
+    branches:
+      - release/v1.0.0-production-finalization
+    paths:
+      - '.github/workflows/desktop-finalized-source-proof.yml'
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  SOURCE_RUN_ID: '33799971760'
+  SOURCE_ARTIFACT_NAME: GDScript-Lab-v1.0.0-PRODUCTION-FINALIZED-SOURCE-V2
+  SOURCE_ZIP: GDScript_Lab_v1.0.0_PRODUCTION_FINALIZED_SOURCE.zip
+  SOURCE_ZIP_SHA256: 615412cd34c93c18d622e18a8d474b8c53ad565afac1a57b18f5db22c893d9b4
+  PROJECT_DIR: GDScript_Lab_Tauri_v1.0.0
+  EXPECTED_FRONTEND_SHA256: 628151d40b067f8ab55da80030862720d319d07f69d62d5b532bfd0fdc311336
+  EXPECTED_PORTABLE_SHA256: e9961e8ed86526cff1a51725dd013c4370a159754642f3c6628779202095108d
+  EXPECTED_COURSE_SHA256: c0a663fb0cf5cf8876e3279e70d5783d245a615cbf6238cf82a1ad67e1408abe
+  NODE_VERSION: '22.16.0'
+  RUST_VERSION: '1.98.0'
+
+jobs:
+  linux:
+    name: Linux x64 authoritative-source build + runtime
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Download authoritative source
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.SOURCE_ARTIFACT_NAME }}
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ env.SOURCE_RUN_ID }}
+          path: source-artifact
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.13' }
+      - name: Extract and verify exact source
+        shell: bash
+        run: |
+          set -euo pipefail
+          FOUND="$(find source-artifact -type f -name "$SOURCE_ZIP" -print -quit)"
+          test -n "$FOUND"
+          test "$(sha256sum "$FOUND" | awk '{print $1}')" = "$SOURCE_ZIP_SHA256"
+          python -m zipfile -e "$FOUND" .
+          test "$(sha256sum "$PROJECT_DIR/src/index.html" | awk '{print $1}')" = "$EXPECTED_FRONTEND_SHA256"
+          test "$(sha256sum "$PROJECT_DIR/portable/GDScript_Lab_Godot47_v1.0.0.html" | awk '{print $1}')" = "$EXPECTED_PORTABLE_SHA256"
+          cd "$PROJECT_DIR"
+          python scripts/audit.py | tee "$RUNNER_TEMP/SOURCE_AUDIT.txt"
+          grep -q "$EXPECTED_COURSE_SHA256" "$RUNNER_TEMP/SOURCE_AUDIT.txt"
+          python - <<'PY'
+          import json
+          m=json.load(open('BUILD_MANIFEST.json',encoding='utf-8'))
+          assert m['pinned_toolchain']['android_ndk']=='29.0.14206865'
+          assert m['toolchains']['android_ndk']=='29.0.14206865'
+          PY
+      - name: Install Linux prerequisites
+        run: |
+          sudo apt-get -o Acquire::Retries=3 update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf xdg-utils xvfb
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: GDScript_Lab_Tauri_v1.0.0/package-lock.json
+      - uses: dtolnay/rust-toolchain@master
+        with: { toolchain: '${{ env.RUST_VERSION }}' }
+      - uses: swatinem/rust-cache@v2
+        with: { workspaces: './GDScript_Lab_Tauri_v1.0.0/src-tauri -> target' }
+      - name: Build and smoke-test
+        working-directory: GDScript_Lab_Tauri_v1.0.0
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run icons
+          cargo metadata --locked --format-version 1 --manifest-path src-tauri/Cargo.toml >/dev/null
+          npm run tauri -- build --bundles appimage,deb
+          APP="$(find src-tauri/target -type f -name '*.AppImage' -print -quit)"
+          DEB="$(find src-tauri/target -type f -name '*.deb' -print -quit)"
+          test -n "$APP" && test -n "$DEB"
+          chmod +x "$APP"
+          xvfb-run -a env APPIMAGE_EXTRACT_AND_RUN=1 "$APP" > "$RUNNER_TEMP/linux-smoke.log" 2>&1 & PID=$!
+          sleep 10
+          kill -0 "$PID"
+          kill "$PID" || true; wait "$PID" || true
+          OUT="$RUNNER_TEMP/linux-finalized"; mkdir -p "$OUT"
+          cp "$APP" "$OUT/GDScript-Lab-v1.0.0.AppImage"
+          cp "$DEB" "$OUT/GDScript-Lab-v1.0.0.deb"
+          cp "$RUNNER_TEMP/SOURCE_AUDIT.txt" "$OUT/SOURCE_AUDIT.txt"
+          printf '%s\n' 'PASS: authoritative-source Linux AppImage launched under Xvfb.' > "$OUT/LINUX_RUNTIME_VERIFICATION.txt"
+          sha256sum "$OUT"/* > "$OUT/SHA256SUMS.txt"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GDScript-Lab-v1.0.0-AUTHORITATIVE-Linux-x64
+          path: ${{ runner.temp }}/linux-finalized/**
+          if-no-files-found: error
+          retention-days: 90
+
+  windows:
+    name: Windows x64 authoritative-source build + runtime
+    runs-on: windows-latest
+    steps:
+      - name: Download authoritative source
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.SOURCE_ARTIFACT_NAME }}
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ env.SOURCE_RUN_ID }}
+          path: source-artifact
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.13' }
+      - name: Extract and verify exact source
+        shell: pwsh
+        run: |
+          $found=Get-ChildItem source-artifact -Recurse -File -Filter $env:SOURCE_ZIP | Select-Object -First 1
+          if (-not $found) { throw 'Authoritative source ZIP not found' }
+          $actual=(Get-FileHash $found.FullName -Algorithm SHA256).Hash.ToLower()
+          if ($actual -ne $env:SOURCE_ZIP_SHA256) { throw "Source ZIP hash mismatch: $actual" }
+          python -m zipfile -e $found.FullName .
+          if ((Get-FileHash "$env:PROJECT_DIR/src/index.html" -Algorithm SHA256).Hash.ToLower() -ne $env:EXPECTED_FRONTEND_SHA256) { throw 'Frontend hash mismatch' }
+          if ((Get-FileHash "$env:PROJECT_DIR/portable/GDScript_Lab_Godot47_v1.0.0.html" -Algorithm SHA256).Hash.ToLower() -ne $env:EXPECTED_PORTABLE_SHA256) { throw 'Portable hash mismatch' }
+          Push-Location $env:PROJECT_DIR
+          python scripts/audit.py | Tee-Object -FilePath "$env:RUNNER_TEMP/SOURCE_AUDIT.txt"
+          if (-not (Select-String -Path "$env:RUNNER_TEMP/SOURCE_AUDIT.txt" -Pattern $env:EXPECTED_COURSE_SHA256 -Quiet)) { throw 'Course hash missing' }
+          $m=Get-Content BUILD_MANIFEST.json -Raw | ConvertFrom-Json
+          if ($m.pinned_toolchain.android_ndk -ne '29.0.14206865' -or $m.toolchains.android_ndk -ne '29.0.14206865') { throw 'NDK manifest mismatch' }
+          Pop-Location
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: GDScript_Lab_Tauri_v1.0.0/package-lock.json
+      - uses: dtolnay/rust-toolchain@master
+        with: { toolchain: '${{ env.RUST_VERSION }}' }
+      - uses: swatinem/rust-cache@v2
+        with: { workspaces: './GDScript_Lab_Tauri_v1.0.0/src-tauri -> target' }
+      - name: Build and smoke-test
+        working-directory: GDScript_Lab_Tauri_v1.0.0
+        shell: pwsh
+        run: |
+          npm ci
+          npm run icons
+          cargo metadata --locked --format-version 1 --manifest-path src-tauri/Cargo.toml | Out-Null
+          npm run build:windows
+          $setup=Get-ChildItem src-tauri/target -Recurse -File | Where-Object { $_.FullName -match '\\bundle\\nsis\\.*\.exe$' } | Select-Object -First 1
+          $msi=Get-ChildItem src-tauri/target -Recurse -File | Where-Object { $_.FullName -match '\\bundle\\msi\\.*\.msi$' } | Select-Object -First 1
+          $app=Get-ChildItem src-tauri/target -Recurse -File -Filter gdscript-lab.exe | Where-Object { $_.FullName -match '\\release\\gdscript-lab\.exe$' } | Select-Object -First 1
+          if (-not $setup -or -not $msi -or -not $app) { throw 'Expected Windows artifacts missing' }
+          $p=Start-Process $app.FullName -PassThru; Start-Sleep 10
+          if ($p.HasExited) { throw "Application exited with $($p.ExitCode)" }
+          Stop-Process $p.Id -Force
+          $out="$env:RUNNER_TEMP\windows-finalized"; New-Item -ItemType Directory -Force -Path $out | Out-Null
+          Copy-Item $setup.FullName "$out\GDScript-Lab-v1.0.0-Setup.exe"
+          Copy-Item $msi.FullName "$out\GDScript-Lab-v1.0.0.msi"
+          Copy-Item "$env:RUNNER_TEMP\SOURCE_AUDIT.txt" "$out\SOURCE_AUDIT.txt"
+          'PASS: authoritative-source Windows executable launched and remained alive for the smoke interval.' | Set-Content "$out\WINDOWS_RUNTIME_VERIFICATION.txt"
+          Get-ChildItem $out -File | Get-FileHash -Algorithm SHA256 | ForEach-Object { "$($_.Hash.ToLower())  $([IO.Path]::GetFileName($_.Path))" } | Set-Content "$out\SHA256SUMS.txt"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GDScript-Lab-v1.0.0-AUTHORITATIVE-Windows-x64
+          path: ${{ runner.temp }}/windows-finalized/**
+          if-no-files-found: error
+          retention-days: 90
+
+  macos:
+    name: macOS ${{ matrix.arch }} authoritative-source build + runtime
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: Apple-Silicon, target: aarch64-apple-darwin, os: macos-15 }
+          - { arch: Intel, target: x86_64-apple-darwin, os: macos-15-intel }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Download authoritative source
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.SOURCE_ARTIFACT_NAME }}
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ env.SOURCE_RUN_ID }}
+          path: source-artifact
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.13' }
+      - name: Extract and verify exact source
+        shell: bash
+        run: |
+          set -euo pipefail
+          FOUND="$(find source-artifact -type f -name "$SOURCE_ZIP" -print -quit)"
+          test -n "$FOUND"
+          test "$(shasum -a 256 "$FOUND" | awk '{print $1}')" = "$SOURCE_ZIP_SHA256"
+          python -m zipfile -e "$FOUND" .
+          test "$(shasum -a 256 "$PROJECT_DIR/src/index.html" | awk '{print $1}')" = "$EXPECTED_FRONTEND_SHA256"
+          test "$(shasum -a 256 "$PROJECT_DIR/portable/GDScript_Lab_Godot47_v1.0.0.html" | awk '{print $1}')" = "$EXPECTED_PORTABLE_SHA256"
+          cd "$PROJECT_DIR"
+          python scripts/audit.py | tee "$RUNNER_TEMP/SOURCE_AUDIT.txt"
+          grep -q "$EXPECTED_COURSE_SHA256" "$RUNNER_TEMP/SOURCE_AUDIT.txt"
+          python - <<'PY'
+          import json
+          m=json.load(open('BUILD_MANIFEST.json',encoding='utf-8'))
+          assert m['pinned_toolchain']['android_ndk']=='29.0.14206865'
+          assert m['toolchains']['android_ndk']=='29.0.14206865'
+          PY
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: GDScript_Lab_Tauri_v1.0.0/package-lock.json
+      - uses: dtolnay/rust-toolchain@master
+        with: { toolchain: '${{ env.RUST_VERSION }}', targets: '${{ matrix.target }}' }
+      - uses: swatinem/rust-cache@v2
+        with: { workspaces: './GDScript_Lab_Tauri_v1.0.0/src-tauri -> target' }
+      - name: Build and smoke-test
+        working-directory: GDScript_Lab_Tauri_v1.0.0
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run icons
+          cargo metadata --locked --format-version 1 --manifest-path src-tauri/Cargo.toml >/dev/null
+          npm run tauri -- build --target '${{ matrix.target }}' --bundles app,dmg
+          APP="$(find src-tauri/target -type d -path '*/bundle/macos/*.app' -print -quit)"
+          DMG="$(find src-tauri/target -type f -path '*/bundle/dmg/*.dmg' -print -quit)"
+          test -n "$APP" && test -n "$DMG"
+          APP_EXEC="$(find "$APP/Contents/MacOS" -maxdepth 1 -type f -perm +111 -print -quit)"
+          test -n "$APP_EXEC"
+          "$APP_EXEC" > "$RUNNER_TEMP/macos-smoke.log" 2>&1 & PID=$!
+          sleep 10
+          kill -0 "$PID"
+          kill "$PID" || true; wait "$PID" || true
+          OUT="$RUNNER_TEMP/macos-finalized"; mkdir -p "$OUT"
+          cp "$DMG" "$OUT/GDScript-Lab-v1.0.0-macOS-${{ matrix.arch }}.dmg"
+          cp "$RUNNER_TEMP/SOURCE_AUDIT.txt" "$OUT/SOURCE_AUDIT.txt"
+          printf '%s\n' 'PASS: authoritative-source macOS app launched on its native-architecture runner. Developer-ID notarization is a separate publisher-credential gate.' > "$OUT/MACOS_RUNTIME_VERIFICATION.txt"
+          shasum -a 256 "$OUT"/* > "$OUT/SHA256SUMS.txt"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GDScript-Lab-v1.0.0-AUTHORITATIVE-macOS-${{ matrix.arch }}
+          path: ${{ runner.temp }}/macos-finalized/**
+          if-no-files-found: error
+          retention-days: 90

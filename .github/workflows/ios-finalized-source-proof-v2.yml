@@ -1,0 +1,86 @@
+name: GDScript Lab v1.0.0 authoritative iOS source proof
+
+on:
+  push:
+    branches:
+      - release/v1.0.0-production-finalization
+    paths:
+      - '.github/workflows/ios-finalized-source-proof-v2.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  SOURCE_RUN_ID: '33799971760'
+  SOURCE_ARTIFACT_NAME: GDScript-Lab-v1.0.0-PRODUCTION-FINALIZED-SOURCE-V2
+  SOURCE_ZIP: GDScript_Lab_v1.0.0_PRODUCTION_FINALIZED_SOURCE.zip
+  SOURCE_ZIP_SHA256: 615412cd34c93c18d622e18a8d474b8c53ad565afac1a57b18f5db22c893d9b4
+  PROJECT_DIR: GDScript_Lab_Tauri_v1.0.0
+
+jobs:
+  ios-authoritative-compile:
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.13' }
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.SOURCE_ARTIFACT_NAME }}
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ env.SOURCE_RUN_ID }}
+          path: source-artifact
+      - name: Verify and extract authoritative source
+        shell: bash
+        run: |
+          set -euo pipefail
+          python .github/scripts/verify-finalized-source.py source-artifact . | tee "$RUNNER_TEMP/FINAL_SOURCE_AUDIT.txt"
+      - name: Require Xcode 26+ and iOS 26 SDK+
+        shell: bash
+        run: |
+          set -euo pipefail
+          XCODE_VERSION_OUTPUT="$(xcodebuild -version)"
+          printf '%s\n' "$XCODE_VERSION_OUTPUT" | tee "$RUNNER_TEMP/XCODE_VERSION.txt"
+          XCODE_MAJOR="$(printf '%s\n' "$XCODE_VERSION_OUTPUT" | awk '/^Xcode /{split($2,v,"."); print v[1]}')"
+          test -n "$XCODE_MAJOR" && test "$XCODE_MAJOR" -ge 26
+          xcrun --sdk iphoneos --show-sdk-version | tee "$RUNNER_TEMP/IOS_SDK_VERSION.txt"
+          SDK_MAJOR="$(cut -d. -f1 < "$RUNNER_TEMP/IOS_SDK_VERSION.txt")"
+          test "$SDK_MAJOR" -ge 26
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.16.0'
+          cache: npm
+          cache-dependency-path: GDScript_Lab_Tauri_v1.0.0/package-lock.json
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.98.0'
+          targets: aarch64-apple-ios,x86_64-apple-ios,aarch64-apple-ios-sim
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './GDScript_Lab_Tauri_v1.0.0/src-tauri -> target'
+      - name: Compile authoritative iOS 15+ source without distribution signing
+        working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v pod >/dev/null || brew install cocoapods
+          npm ci
+          npm run icons
+          python scripts/audit.py
+          npm run ios:init
+          npm run ios:build
+          printf '%s\n' 'PASS: authoritative v1.0.0 source compiled at iOS minimum 15.0 on Xcode 26+ / iOS 26 SDK+ without distribution signing.' > "$RUNNER_TEMP/IOS_FINALIZED_COMPILE_VALIDATION.txt"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GDScript-Lab-v1.0.0-AUTHORITATIVE-iOS-compile-proof
+          path: |
+            ${{ runner.temp }}/IOS_FINALIZED_COMPILE_VALIDATION.txt
+            ${{ runner.temp }}/XCODE_VERSION.txt
+            ${{ runner.temp }}/IOS_SDK_VERSION.txt
+            ${{ runner.temp }}/FINAL_SOURCE_AUDIT.txt
+          if-no-files-found: error
+          retention-days: 90
