@@ -4,6 +4,7 @@ on:
   push:
     paths:
       - '.github/workflows/android-16k-production-source.yml'
+      - '.cargo/android-16k-config.toml'
   workflow_dispatch:
 
 permissions:
@@ -56,6 +57,16 @@ jobs:
           python scripts/no_unicode_dashes_check.py
           python scripts/audit.py | tee "$RUNNER_TEMP/SOURCE_AUDIT.txt"
           grep -q "$EXPECTED_COURSE_SHA256" "$RUNNER_TEMP/SOURCE_AUDIT.txt"
+      - name: Inject durable Android 16 KB Cargo linker policy
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s .cargo/android-16k-config.toml
+          mkdir -p "$PROJECT_DIR/.cargo"
+          cp .cargo/android-16k-config.toml "$PROJECT_DIR/.cargo/config.toml"
+          grep -q 'max-page-size=16384' "$PROJECT_DIR/.cargo/config.toml"
+          grep -q 'common-page-size=16384' "$PROJECT_DIR/.cargo/config.toml"
+          printf '%s\n' 'PASS: actual Tauri/Cargo Android build will inherit explicit 16 KB linker flags.'
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
@@ -80,15 +91,18 @@ jobs:
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: './GDScript_Lab_Tauri_v1.0.0/src-tauri -> target'
-      - name: Build exact unsigned APK and AAB
+      - name: Build exact unsigned APK and AAB from a clean native target
         working-directory: ${{ env.PROJECT_DIR }}
         shell: bash
+        env:
+          CARGO_INCREMENTAL: '0'
         run: |
           set -euo pipefail
           npm ci
           npm run icons
           python scripts/audit.py
           cargo metadata --locked --format-version 1 --manifest-path src-tauri/Cargo.toml >/dev/null
+          cargo clean --manifest-path src-tauri/Cargo.toml
           npm run android:init
           npm run android:apk
           npm run android:aab
@@ -112,21 +126,24 @@ jobs:
           READELF="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
           python - "$READELF" "$RUNNER_TEMP/apk-elf" "$RUNNER_TEMP/aab-elf" <<'PY'
           import pathlib,re,subprocess,sys
-          readelf=sys.argv[1]; checked=[]
+          readelf=sys.argv[1]; checked=[]; lines=[]
           for root in map(pathlib.Path,sys.argv[2:]):
               for so in sorted(root.rglob('*.so')):
                   out=subprocess.check_output([readelf,'-lW',str(so)],text=True)
                   aligns=[int(line.split()[-1],16) for line in out.splitlines() if re.match(r'^\s*LOAD\s',line)]
                   if not aligns or min(aligns)<0x4000:
                       raise SystemExit(f'16 KB ELF FAIL: {so} LOAD aligns={aligns}')
-                  print(f'PASS 16 KB ELF {min(aligns):#x}: {so}')
-                  checked.append(str(so))
+                  msg=f'PASS 16 KB ELF {min(aligns):#x}: {so}'
+                  print(msg); lines.append(msg); checked.append(str(so))
           if not checked: raise SystemExit('No native libraries found')
-          print(f'PASS: {len(checked)} APK/AAB native-library payloads are >=16 KB aligned')
+          summary=f'PASS: {len(checked)} APK/AAB native-library payloads are >=16 KB aligned'
+          print(summary); lines.append(summary)
+          pathlib.Path(sys.argv[2]).parent.joinpath('ANDROID_ELF_16K_VERIFICATION.txt').write_text('\n'.join(lines)+'\n')
           PY
+          cp "$RUNNER_TEMP/ANDROID_ELF_16K_VERIFICATION.txt" "$RUNNER_TEMP/ANDROID_ELF_16K_VERIFICATION.txt" 2>/dev/null || true
           echo "UNSIGNED_APK=$APK" >> "$GITHUB_ENV"
           echo "UNSIGNED_AAB=$AAB" >> "$GITHUB_ENV"
-      - name: Stage exact unsigned production payload
+      - name: Stage exact unsigned production payload and corrected source
         shell: bash
         run: |
           set -euo pipefail
@@ -135,7 +152,23 @@ jobs:
           cp "$PROJECT_DIR/$UNSIGNED_AAB" "$OUT/GDScript-Lab-v1.0.0-Android-16K-UNSIGNED.aab"
           cp "$RUNNER_TEMP/APK_BADGING_16K.txt" "$OUT/APK_BADGING_16K.txt"
           cp "$RUNNER_TEMP/APK_ZIPALIGN_16K.txt" "$OUT/APK_ZIPALIGN_16K.txt"
-          sha256sum "$OUT"/*.apk "$OUT"/*.aab > "$OUT/SHA256SUMS.txt"
+          test -s "$RUNNER_TEMP/ANDROID_ELF_16K_VERIFICATION.txt"
+          cp "$RUNNER_TEMP/ANDROID_ELF_16K_VERIFICATION.txt" "$OUT/ANDROID_ELF_16K_VERIFICATION.txt"
+          python - <<'PY'
+          import pathlib, zipfile
+          project=pathlib.Path('GDScript_Lab_Tauri_v1.0.0')
+          out=pathlib.Path('/tmp/GDScript_Lab_v1.0.0_PRODUCTION_SOURCE_16K_FIXED.zip')
+          with zipfile.ZipFile(out,'w',zipfile.ZIP_DEFLATED,compresslevel=9) as z:
+              for p in sorted(project.rglob('*')):
+                  if not p.is_file(): continue
+                  rel=p.relative_to(project.parent)
+                  parts=set(rel.parts)
+                  if 'node_modules' in parts or 'target' in parts or ('gen' in parts and 'android' in parts):
+                      continue
+                  z.write(p,rel)
+          PY
+          cp /tmp/GDScript_Lab_v1.0.0_PRODUCTION_SOURCE_16K_FIXED.zip "$OUT/"
+          sha256sum "$OUT"/*.apk "$OUT"/*.aab "$OUT"/*.zip > "$OUT/SHA256SUMS.txt"
       - name: Sign exact APK with ephemeral QA identity
         shell: bash
         run: |
