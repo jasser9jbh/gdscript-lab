@@ -1,0 +1,175 @@
+name: GDScript Lab Android 16 KB runtime diagnostic
+
+on:
+  push:
+    paths:
+      - '.github/workflows/android-16k-runtime-diagnostic.yml'
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+env:
+  SOURCE_RUN_ID: '33692246998'
+  SOURCE_ARTIFACT_NAME: GDScript-Lab-v1.0.0-PRODUCTION-source
+  SOURCE_ZIP: GDScript_Lab_v1.0.0_PRODUCTION_SOURCE.zip
+  SOURCE_ZIP_SHA256: 53dd49b8b9ab98de0dd240c6ef31862cd2d04298ed33b7a57562f81269a8f3aa
+  PROJECT_DIR: GDScript_Lab_Tauri_v1.0.0
+  NODE_VERSION: '22.16.0'
+  RUST_VERSION: '1.98.0'
+  NDK_VERSION: '29.0.14206865'
+
+jobs:
+  runtime-diagnostic:
+    name: Android 15 16 KB exact runtime diagnostic
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download exact normalized production source
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.SOURCE_ARTIFACT_NAME }}
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ env.SOURCE_RUN_ID }}
+          path: production-source-artifact
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Verify and extract source, inject 16 KB policy
+        shell: bash
+        run: |
+          set -euo pipefail
+          FOUND="$(find production-source-artifact -type f -name "$SOURCE_ZIP" -print -quit)"
+          test -n "$FOUND"
+          test "$(sha256sum "$FOUND" | awk '{print $1}')" = "$SOURCE_ZIP_SHA256"
+          python -m zipfile -e "$FOUND" .
+          mkdir -p "$PROJECT_DIR/.cargo"
+          cp .cargo/android-16k-config.toml "$PROJECT_DIR/.cargo/config.toml"
+          grep -q 'max-page-size=16384' "$PROJECT_DIR/.cargo/config.toml"
+          grep -q 'common-page-size=16384' "$PROJECT_DIR/.cargo/config.toml"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: GDScript_Lab_Tauri_v1.0.0/package-lock.json
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v4
+
+      - name: Install API 36, Build Tools 36 and NDK r29
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdkmanager 'platform-tools' 'platforms;android-36' 'build-tools;36.0.0' "ndk;${NDK_VERSION}"
+          echo "NDK_HOME=$ANDROID_HOME/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './GDScript_Lab_Tauri_v1.0.0/src-tauri -> target'
+
+      - name: Clean-build exact release APK
+        working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
+        env:
+          CARGO_INCREMENTAL: '0'
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run icons
+          python scripts/audit.py
+          cargo clean --manifest-path src-tauri/Cargo.toml
+          npm run android:init
+          npm run android:apk
+          APK="$(find src-tauri/gen/android/app/build/outputs -type f -name '*release-unsigned.apk' -print -quit)"
+          test -n "$APK"
+          "$ANDROID_HOME/build-tools/36.0.0/zipalign" -c -P 16 -v 4 "$APK"
+          mkdir -p "$RUNNER_TEMP/apk-elf"
+          unzip -q "$APK" 'lib/*/*.so' -d "$RUNNER_TEMP/apk-elf"
+          READELF="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
+          python - "$READELF" "$RUNNER_TEMP/apk-elf" <<'PY'
+          import pathlib,re,subprocess,sys
+          readelf=sys.argv[1]
+          checked=0
+          for so in sorted(pathlib.Path(sys.argv[2]).rglob('*.so')):
+              out=subprocess.check_output([readelf,'-lW',str(so)],text=True)
+              aligns=[int(x.split()[-1],16) for x in out.splitlines() if re.match(r'^\s*LOAD\s',x)]
+              if not aligns or min(aligns)<0x4000:
+                  raise SystemExit(f'16 KB ELF FAIL: {so}: {aligns}')
+              print(f'PASS 16 KB ELF {min(aligns):#x}: {so}')
+              checked+=1
+          if not checked: raise SystemExit('No native libraries found')
+          PY
+          "$ANDROID_HOME/build-tools/36.0.0/zipalign" -f -P 16 4 "$APK" "$RUNNER_TEMP/gdlab-aligned.apk"
+          keytool -genkeypair -noprompt -keystore "$RUNNER_TEMP/qa.jks" -storepass qa123456 -keypass qa123456 -alias qa -keyalg RSA -keysize 2048 -validity 30 -dname 'CN=GDScript Lab 16 KB CI QA'
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" sign --ks "$RUNNER_TEMP/qa.jks" --ks-key-alias qa --ks-pass pass:qa123456 --key-pass pass:qa123456 --out "$RUNNER_TEMP/gdlab-qa.apk" "$RUNNER_TEMP/gdlab-aligned.apk"
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose "$RUNNER_TEMP/gdlab-qa.apk"
+          echo "QA_APK=$RUNNER_TEMP/gdlab-qa.apk" >> "$GITHUB_ENV"
+
+      - name: Enable KVM
+        shell: bash
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm || true
+
+      - name: Run exact launch and preserve evidence
+        uses: ReactiveCircus/android-emulator-runner@v2.38.0
+        with:
+          api-level: 35
+          arch: x86_64
+          target: google_apis_ps16k
+          disable-animations: true
+          script: |
+            set -u
+            OUT="$RUNNER_TEMP/android-16k-runtime-diagnostic"
+            mkdir -p "$OUT"
+            adb shell getconf PAGE_SIZE | tr -d '\r' | tee "$OUT/PAGE_SIZE.txt"
+            grep -x '16384' "$OUT/PAGE_SIZE.txt" || exit 20
+            adb install -r "$QA_APK" | tee "$OUT/ADB_INSTALL.txt" || exit 21
+            adb logcat -c
+            adb shell am force-stop com.jbhprods.gdscriptlab || true
+            adb shell am start -W -n com.jbhprods.gdscriptlab/.MainActivity > "$OUT/AM_START.txt" 2>&1
+            START_RC=$?
+            sleep 12
+            adb shell pidof com.jbhprods.gdscriptlab | tr -d '\r' > "$OUT/PIDOF.txt" || true
+            adb logcat -d -v threadtime > "$OUT/LOGCAT.txt" 2>&1 || true
+            adb shell dumpsys activity activities > "$OUT/DUMPSYS_ACTIVITY.txt" 2>&1 || true
+            adb shell dumpsys package com.jbhprods.gdscriptlab > "$OUT/DUMPSYS_PACKAGE.txt" 2>&1 || true
+            grep -Ei 'com\.jbhprods\.gdscriptlab|AndroidRuntime|FATAL EXCEPTION|linker|dlopen|UnsatisfiedLinkError|SIGABRT|SIGSEGV|libgdscript|tauri|WebView' "$OUT/LOGCAT.txt" > "$OUT/LOGCAT_RELEVANT.txt" || true
+            echo "am_start_exit=$START_RC" > "$OUT/RUNTIME_STATUS.txt"
+            if [ -s "$OUT/PIDOF.txt" ]; then
+              echo "process_alive=yes" >> "$OUT/RUNTIME_STATUS.txt"
+              cat "$OUT/PIDOF.txt"
+              echo 'PASS: exact app process stayed alive on Android 15 16 KB emulator.' | tee "$OUT/ANDROID_16K_RUNTIME_VERIFICATION.txt"
+              exit 0
+            fi
+            echo "process_alive=no" >> "$OUT/RUNTIME_STATUS.txt"
+            echo 'FAIL: app process exited after launch; preserved logcat follows.' >&2
+            tail -n 300 "$OUT/LOGCAT_RELEVANT.txt" >&2 || true
+            exit 22
+
+      - name: Upload runtime diagnostic evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: GDScript-Lab-v1.0.0-Android-16K-Runtime-Diagnostic
+          path: ${{ runner.temp }}/android-16k-runtime-diagnostic/**
+          if-no-files-found: warn
+          retention-days: 30
