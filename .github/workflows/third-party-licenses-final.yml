@@ -1,0 +1,96 @@
+name: GDScript Lab final third-party license report
+
+on:
+  push:
+    paths:
+      - '.github/workflows/third-party-licenses-final.yml'
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+env:
+  SOURCE_RUN_ID: '33692246998'
+  SOURCE_ARTIFACT_NAME: GDScript-Lab-v1.0.0-PRODUCTION-source
+  SOURCE_ZIP: GDScript_Lab_v1.0.0_PRODUCTION_SOURCE.zip
+  SOURCE_ZIP_SHA256: 53dd49b8b9ab98de0dd240c6ef31862cd2d04298ed33b7a57562f81269a8f3aa
+  PROJECT_DIR: GDScript_Lab_Tauri_v1.0.0
+  RUST_VERSION: '1.98.0'
+
+jobs:
+  licenses:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download and verify exact normalized production source
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.SOURCE_ARTIFACT_NAME }}
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ env.SOURCE_RUN_ID }}
+          path: production-source-artifact
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Extract exact source
+        shell: bash
+        run: |
+          set -euo pipefail
+          FOUND="$(find production-source-artifact -type f -name "$SOURCE_ZIP" -print -quit)"
+          test -n "$FOUND"
+          test "$(sha256sum "$FOUND" | awk '{print $1}')" = "$SOURCE_ZIP_SHA256"
+          python -m zipfile -e "$FOUND" .
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './GDScript_Lab_Tauri_v1.0.0/src-tauri -> target'
+
+      - name: Install cargo-about CLI
+        shell: bash
+        run: cargo install --locked --features cli cargo-about
+
+      - name: Generate full license-text report from exact Cargo.lock
+        working-directory: ${{ env.PROJECT_DIR }}/src-tauri
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo about init
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('about.toml')
+          s=p.read_text()
+          # MPL-2.0 is used by dependencies in the locked graph and is not in cargo-about's default accepted list.
+          if '"MPL-2.0"' not in s:
+              s=s.replace('accepted = [', 'accepted = [\n    "MPL-2.0",', 1)
+          p.write_text(s)
+          h=Path('about.hbs')
+          hs=h.read_text().replace('projects used in cargo-about', 'third-party projects used in GDScript Lab')
+          h.write_text(hs)
+          PY
+          cargo about generate -o "$GITHUB_WORKSPACE/THIRD_PARTY_LICENSES.html" about.hbs
+          test -s "$GITHUB_WORKSPACE/THIRD_PARTY_LICENSES.html"
+          grep -qi 'Third Party Licenses' "$GITHUB_WORKSPACE/THIRD_PARTY_LICENSES.html"
+          grep -qi 'tauri' "$GITHUB_WORKSPACE/THIRD_PARTY_LICENSES.html"
+          cp about.toml "$GITHUB_WORKSPACE/cargo-about.toml"
+          sha256sum "$GITHUB_WORKSPACE/THIRD_PARTY_LICENSES.html" > "$GITHUB_WORKSPACE/THIRD_PARTY_LICENSES.html.sha256"
+
+      - name: Upload reviewed-format license evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: GDScript-Lab-v1.0.0-THIRD-PARTY-LICENSES
+          path: |
+            THIRD_PARTY_LICENSES.html
+            THIRD_PARTY_LICENSES.html.sha256
+            cargo-about.toml
+          if-no-files-found: error
+          retention-days: 90
