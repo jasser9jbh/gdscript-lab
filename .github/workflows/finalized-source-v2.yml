@@ -1,0 +1,112 @@
+name: GDScript Lab v1.0.0 authoritative finalized source v2
+
+on:
+  push:
+    branches:
+      - release/v1.0.0-production-finalization
+    paths:
+      - '.github/workflows/finalized-source-v2.yml'
+      - '.github/scripts/finalize-v1-source.py'
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  INPUT_RUN_ID: '33795848691'
+  INPUT_ARTIFACT: GDScript-Lab-v1.0.0-PRODUCTION-FINALIZED-SOURCE
+  SOURCE_ZIP: GDScript_Lab_v1.0.0_PRODUCTION_FINALIZED_SOURCE.zip
+  INPUT_SOURCE_SHA256: c418540f7ef9a00783b44751d3316e37a57e1c486fb071c0136d0fca5d7b1527
+  PROJECT_DIR: GDScript_Lab_Tauri_v1.0.0
+  FRONTEND_SHA256: 628151d40b067f8ab55da80030862720d319d07f69d62d5b532bfd0fdc311336
+  PORTABLE_SHA256: e9961e8ed86526cff1a51725dd013c4370a159754642f3c6628779202095108d
+  COURSE_SHA256: c0a663fb0cf5cf8876e3279e70d5783d245a615cbf6238cf82a1ad67e1408abe
+  NDK_VERSION: '29.0.14206865'
+
+jobs:
+  finalize:
+    name: Correct metadata, re-audit and freeze authoritative source
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Download previously proven finalized source
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.INPUT_ARTIFACT }}
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ env.INPUT_RUN_ID }}
+          path: input
+      - name: Verify input, apply authoritative finalizer and audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          FOUND="$(find input -type f -name "$SOURCE_ZIP" -print -quit)"
+          test -n "$FOUND"
+          test "$(sha256sum "$FOUND" | awk '{print $1}')" = "$INPUT_SOURCE_SHA256"
+          mkdir work
+          python -m zipfile -e "$FOUND" work
+          test "$(sha256sum "work/$PROJECT_DIR/src/index.html" | awk '{print $1}')" = "$FRONTEND_SHA256"
+          test "$(sha256sum "work/$PROJECT_DIR/portable/GDScript_Lab_Godot47_v1.0.0.html" | awk '{print $1}')" = "$PORTABLE_SHA256"
+          python .github/scripts/finalize-v1-source.py "work/$PROJECT_DIR"
+          cd "work/$PROJECT_DIR"
+          python scripts/audit.py | tee "$RUNNER_TEMP/FINAL_SOURCE_AUDIT_V2.txt"
+          grep -q "$COURSE_SHA256" "$RUNNER_TEMP/FINAL_SOURCE_AUDIT_V2.txt"
+          python - <<'PY'
+          import json
+          m=json.load(open('BUILD_MANIFEST.json',encoding='utf-8'))
+          assert m['pinned_toolchain']['android_ndk']=='29.0.14206865'
+          assert m['toolchains']['android_ndk']=='29.0.14206865'
+          assert m['release_finalization']['android_ndk']=='29.0.14206865'
+          assert m['release_finalization']['android_target_api']==36
+          assert m['platform_minimums']['ios']=='15.0'
+          assert m['mobile_build_identity']=={'android_version_code':1000000,'ios_bundle_version':'1'}
+          print('PASS: BUILD_MANIFEST release metadata is internally consistent')
+          PY
+          ! grep -n '27\.2\.12479018' BUILD_MANIFEST.json
+          test "$(sha256sum src/index.html | awk '{print $1}')" = "$FRONTEND_SHA256"
+          test "$(sha256sum portable/GDScript_Lab_Godot47_v1.0.0.html | awk '{print $1}')" = "$PORTABLE_SHA256"
+      - name: Create deterministic authoritative source ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import pathlib, zipfile
+          root=pathlib.Path('work/GDScript_Lab_Tauri_v1.0.0')
+          out=pathlib.Path('GDScript_Lab_v1.0.0_PRODUCTION_FINALIZED_SOURCE.zip')
+          fixed=(2026,9,3,0,0,0)
+          with zipfile.ZipFile(out,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=9) as z:
+              for p in sorted(root.rglob('*'),key=lambda x:x.as_posix()):
+                  if not p.is_file(): continue
+                  arc=pathlib.Path(root.name)/p.relative_to(root)
+                  info=zipfile.ZipInfo(arc.as_posix(),fixed)
+                  info.compress_type=zipfile.ZIP_DEFLATED
+                  info.external_attr=(p.stat().st_mode & 0xFFFF) << 16
+                  info.create_system=3
+                  z.writestr(info,p.read_bytes(),compress_type=zipfile.ZIP_DEFLATED,compresslevel=9)
+          PY
+          sha256sum "$SOURCE_ZIP" | tee SOURCE_SHA256.txt
+          cp "$RUNNER_TEMP/FINAL_SOURCE_AUDIT_V2.txt" FINAL_SOURCE_AUDIT_V2.txt
+          rm -rf verify && mkdir verify
+          python -m zipfile -e "$SOURCE_ZIP" verify
+          test "$(sha256sum "verify/$PROJECT_DIR/src/index.html" | awk '{print $1}')" = "$FRONTEND_SHA256"
+          test "$(sha256sum "verify/$PROJECT_DIR/portable/GDScript_Lab_Godot47_v1.0.0.html" | awk '{print $1}')" = "$PORTABLE_SHA256"
+          python - <<'PY'
+          import json
+          m=json.load(open('verify/GDScript_Lab_Tauri_v1.0.0/BUILD_MANIFEST.json',encoding='utf-8'))
+          assert m['pinned_toolchain']['android_ndk']=='29.0.14206865'
+          assert m['toolchains']['android_ndk']=='29.0.14206865'
+          print('PASS: re-extracted authoritative source metadata verified')
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GDScript-Lab-v1.0.0-PRODUCTION-FINALIZED-SOURCE-V2
+          path: |
+            GDScript_Lab_v1.0.0_PRODUCTION_FINALIZED_SOURCE.zip
+            SOURCE_SHA256.txt
+            FINAL_SOURCE_AUDIT_V2.txt
+          if-no-files-found: error
+          retention-days: 90
