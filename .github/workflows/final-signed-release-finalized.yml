@@ -1,4 +1,4 @@
-name: GDScript Lab v1.0.0 trusted release from finalized source
+name: GDScript Lab v1.0.0 trusted release from authoritative source
 
 on:
   workflow_dispatch:
@@ -15,10 +15,10 @@ permissions:
   actions: read
 
 env:
-  SOURCE_RUN_ID: '33795848691'
-  SOURCE_ARTIFACT_NAME: GDScript-Lab-v1.0.0-PRODUCTION-FINALIZED-SOURCE
+  SOURCE_RUN_ID: '33799971760'
+  SOURCE_ARTIFACT_NAME: GDScript-Lab-v1.0.0-PRODUCTION-FINALIZED-SOURCE-V2
   SOURCE_ZIP: GDScript_Lab_v1.0.0_PRODUCTION_FINALIZED_SOURCE.zip
-  SOURCE_ZIP_SHA256: c418540f7ef9a00783b44751d3316e37a57e1c486fb071c0136d0fca5d7b1527
+  SOURCE_ZIP_SHA256: 615412cd34c93c18d622e18a8d474b8c53ad565afac1a57b18f5db22c893d9b4
   PROJECT_DIR: GDScript_Lab_Tauri_v1.0.0
   NODE_VERSION: '22.16.0'
   RUST_VERSION: '1.98.0'
@@ -27,13 +27,13 @@ env:
 
 jobs:
   source_gate:
-    name: Exact finalized-source release gate
+    name: Exact authoritative-source release gate
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: '3.13' }
-      - name: Download exact production-finalized source
+      - name: Download exact authoritative production source
         uses: actions/download-artifact@v4
         with:
           name: ${{ env.SOURCE_ARTIFACT_NAME }}
@@ -41,7 +41,7 @@ jobs:
           repository: ${{ github.repository }}
           run-id: ${{ env.SOURCE_RUN_ID }}
           path: source-artifact
-      - name: Verify finalized source, frozen learner payload and mobile release policy
+      - name: Verify authoritative source, frozen learner payload and mobile release policy
         run: python .github/scripts/verify-finalized-source.py source-artifact verified-source
       - name: Require frozen dependency graphs covered by the public-release security preflight
         shell: bash
@@ -50,7 +50,7 @@ jobs:
           P=verified-source/$PROJECT_DIR
           test "$(sha256sum "$P/package-lock.json" | awk '{print $1}')" = d1b81347875861c66d5c373e59c5f36020eade05bf3ef82868e674af376faede
           test "$(sha256sum "$P/src-tauri/Cargo.lock" | awk '{print $1}')" = 55d3d31b7cefd5591d6d710ff135c6f1cf2cb8b3aa3620c86e710e214915ed4f
-          printf '%s\n' 'PASS: finalized source retains the audited locked dependency graphs.'
+          printf '%s\n' 'PASS: authoritative source retains the audited locked dependency graphs.'
 
   linux:
     name: Linux x64 AppImage + DEB
@@ -89,7 +89,7 @@ jobs:
           test -n "$APP" && test -n "$DEB"; chmod +x "$APP"
           xvfb-run -a env APPIMAGE_EXTRACT_AND_RUN=1 "$APP" > "$RUNNER_TEMP/linux.log" 2>&1 & PID=$!; sleep 10; kill -0 "$PID"; kill "$PID" || true; wait "$PID" || true
           OUT="$RUNNER_TEMP/linux-final"; mkdir -p "$OUT"; cp "$APP" "$OUT/GDScript-Lab-v1.0.0.AppImage"; cp "$DEB" "$OUT/GDScript-Lab-v1.0.0.deb"
-          echo 'PASS: final-source Linux AppImage runtime smoke passed.' > "$OUT/LINUX_RUNTIME_VERIFICATION.txt"; sha256sum "$OUT"/* > "$OUT/SHA256SUMS.txt"
+          echo 'PASS: authoritative-source Linux AppImage runtime smoke passed.' > "$OUT/LINUX_RUNTIME_VERIFICATION.txt"; sha256sum "$OUT"/* > "$OUT/SHA256SUMS.txt"
       - uses: actions/upload-artifact@v4
         with: { name: GDScript-Lab-v1.0.0-TRUSTED-Linux, path: '${{ runner.temp }}/linux-final/**', if-no-files-found: error, retention-days: 90 }
 
@@ -382,10 +382,10 @@ jobs:
           SRC="$(find source-artifact -name "$SOURCE_ZIP" -print -quit)"; test "$(sha256sum "$SRC"|awk '{print $1}')" = "$SOURCE_ZIP_SHA256"; cp "$SRC" "$R/Source/"
           mkdir srcx; unzip -q "$SRC" -d srcx; cp "srcx/$PROJECT_DIR/portable/GDScript_Lab_Godot47_v1.0.0.html" "$R/Portable/"; cp "srcx/$PROJECT_DIR/LICENSE.txt" "$R/"; cp "srcx/$PROJECT_DIR/THIRD_PARTY_NOTICES.md" "$R/"
           find artifacts -type f -name '*VERIFICATION.txt' -exec cp {} "$R/Documentation/" \;
-          printf '%s\n' 'GDScript Lab v1.0.0 — trusted cross-platform release.' 'All platform credential-dependent jobs must pass before this package exists.' 'Private signing material included: NO.' > "$R/README.txt"
+          printf '%s\n' 'GDScript Lab v1.0.0 — trusted cross-platform release from authoritative source.' 'All platform credential-dependent jobs must pass before this package exists.' 'Private signing material included: NO.' > "$R/README.txt"
           find "$R" -type f ! -name SHA256SUMS.txt -print0 | sort -z | xargs -0 sha256sum > "$R/SHA256SUMS.txt"
           python -m zipfile -c GDScript-Lab-v1.0.0-ALL-PLATFORMS-TRUSTED-FINAL.zip "$R"; sha256sum GDScript-Lab-v1.0.0-ALL-PLATFORMS-TRUSTED-FINAL.zip > GDScript-Lab-v1.0.0-ALL-PLATFORMS-TRUSTED-FINAL.zip.sha256
-          if gh release view v1.0.0 --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then gh release upload v1.0.0 GDScript-Lab-v1.0.0-ALL-PLATFORMS-TRUSTED-FINAL.zip GDScript-Lab-v1.0.0-ALL-PLATFORMS-TRUSTED-FINAL.zip.sha256 --clobber --repo "$GITHUB_REPOSITORY"; else gh release create v1.0.0 GDScript-Lab-v1.0.0-ALL-PLATFORMS-TRUSTED-FINAL.zip GDScript-Lab-v1.0.0-ALL-PLATFORMS-TRUSTED-FINAL.zip.sha256 --repo "$GITHUB_REPOSITORY" --target main --title 'GDScript Lab v1.0.0' --notes 'Trusted final release. Publish only after reviewing verification evidence.' --draft; fi
+          if gh release view v1.0.0 --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then gh release upload v1.0.0 GDScript-Lab-v1.0.0-ALL-PLATFORMS-TRUSTED-FINAL.zip GDScript-Lab-v1.0.0-ALL-PLATFORMS-TRUSTED-FINAL.zip.sha256 --clobber --repo "$GITHUB_REPOSITORY"; else gh release create v1.0.0 GDScript-Lab-v1.0.0-ALL-PLATFORMS-TRUSTED-FINAL.zip GDScript-Lab-v1.0.0-ALL-PLATFORMS-TRUSTED-FINAL.zip.sha256 --repo "$GITHUB_REPOSITORY" --target main --title 'GDScript Lab v1.0.0' --notes 'Trusted final release from authoritative source. Publish only after reviewing verification evidence.' --draft; fi
       - uses: actions/upload-artifact@v4
         with:
           name: GDScript-Lab-v1.0.0-ALL-PLATFORMS-TRUSTED-FINAL
