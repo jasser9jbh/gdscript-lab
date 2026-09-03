@@ -1,10 +1,6 @@
 name: Export Android signing tools
 
-# Release engineering refresh: 2026-09-03
 on:
-  push:
-    paths:
-      - '.github/workflows/export-android-sign-tools.yml'
   workflow_dispatch:
 
 permissions:
@@ -18,8 +14,8 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-      - uses: android-actions/setup-android@v3
-      - name: Install Android build tools 36.0.0
+      - uses: android-actions/setup-android@v4
+      - name: Install Android Build Tools 36.0.0
         run: sdkmanager 'build-tools;36.0.0'
       - name: Stage signing and metadata tools
         shell: bash
@@ -39,3 +35,4 @@ jobs:
           name: android-build-tools-signing-36.0.0-linux
           if-no-files-found: error
           path: exported
+          retention-days: 1
