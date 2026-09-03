@@ -129,7 +129,7 @@ jobs:
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm || true
 
-      - name: Run exact launch and preserve evidence
+      - name: Run exact launch and capture evidence
         uses: ReactiveCircus/android-emulator-runner@v2.38.0
         with:
           api-level: 35
@@ -138,12 +138,13 @@ jobs:
           disable-animations: true
           script: |
             set -u
-            OUT="$RUNNER_TEMP/android-16k-runtime-diagnostic"
+            OUT="$GITHUB_WORKSPACE/android-16k-runtime-diagnostic"
             mkdir -p "$OUT"
-            adb shell getconf PAGE_SIZE | tr -d '\r' | tee "$OUT/PAGE_SIZE.txt"
-            grep -x '16384' "$OUT/PAGE_SIZE.txt" || exit 20
-            adb install -r "$QA_APK" | tee "$OUT/ADB_INSTALL.txt" || exit 21
-            adb logcat -c
+            PAGE_SIZE_RC=0
+            adb shell getconf PAGE_SIZE | tr -d '\r' | tee "$OUT/PAGE_SIZE.txt" || PAGE_SIZE_RC=$?
+            adb install -r "$QA_APK" > "$OUT/ADB_INSTALL.txt" 2>&1
+            INSTALL_RC=$?
+            adb logcat -c || true
             adb shell am force-stop com.jbhprods.gdscriptlab || true
             adb shell am start -W -n com.jbhprods.gdscriptlab/.MainActivity > "$OUT/AM_START.txt" 2>&1
             START_RC=$?
@@ -153,23 +154,37 @@ jobs:
             adb shell dumpsys activity activities > "$OUT/DUMPSYS_ACTIVITY.txt" 2>&1 || true
             adb shell dumpsys package com.jbhprods.gdscriptlab > "$OUT/DUMPSYS_PACKAGE.txt" 2>&1 || true
             grep -Ei 'com\.jbhprods\.gdscriptlab|AndroidRuntime|FATAL EXCEPTION|linker|dlopen|UnsatisfiedLinkError|SIGABRT|SIGSEGV|libgdscript|tauri|WebView' "$OUT/LOGCAT.txt" > "$OUT/LOGCAT_RELEVANT.txt" || true
-            echo "am_start_exit=$START_RC" > "$OUT/RUNTIME_STATUS.txt"
-            if [ -s "$OUT/PIDOF.txt" ]; then
-              echo "process_alive=yes" >> "$OUT/RUNTIME_STATUS.txt"
-              cat "$OUT/PIDOF.txt"
-              echo 'PASS: exact app process stayed alive on Android 15 16 KB emulator.' | tee "$OUT/ANDROID_16K_RUNTIME_VERIFICATION.txt"
-              exit 0
-            fi
-            echo "process_alive=no" >> "$OUT/RUNTIME_STATUS.txt"
-            echo 'FAIL: app process exited after launch; preserved logcat follows.' >&2
-            tail -n 300 "$OUT/LOGCAT_RELEVANT.txt" >&2 || true
-            exit 22
+            {
+              echo "page_size_command_exit=$PAGE_SIZE_RC"
+              echo "install_exit=$INSTALL_RC"
+              echo "am_start_exit=$START_RC"
+              if grep -qx '16384' "$OUT/PAGE_SIZE.txt"; then echo 'page_size_16k=yes'; else echo 'page_size_16k=no'; fi
+              if [ -s "$OUT/PIDOF.txt" ]; then echo 'process_alive=yes'; else echo 'process_alive=no'; fi
+            } > "$OUT/RUNTIME_STATUS.txt"
+            cat "$OUT/RUNTIME_STATUS.txt"
+            cat "$OUT/AM_START.txt" || true
+            tail -n 300 "$OUT/LOGCAT_RELEVANT.txt" || true
+            # Never fail here: evidence must be uploaded before the assertion step.
+            exit 0
 
       - name: Upload runtime diagnostic evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: GDScript-Lab-v1.0.0-Android-16K-Runtime-Diagnostic
-          path: ${{ runner.temp }}/android-16k-runtime-diagnostic/**
-          if-no-files-found: warn
+          path: ${{ github.workspace }}/android-16k-runtime-diagnostic/**
+          if-no-files-found: error
           retention-days: 30
+
+      - name: Assert exact Android 16 KB runtime result
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          STATUS="$GITHUB_WORKSPACE/android-16k-runtime-diagnostic/RUNTIME_STATUS.txt"
+          test -f "$STATUS"
+          grep -qx 'page_size_16k=yes' "$STATUS"
+          grep -qx 'install_exit=0' "$STATUS"
+          grep -qx 'am_start_exit=0' "$STATUS"
+          grep -qx 'process_alive=yes' "$STATUS"
+          echo 'PASS: exact app process stayed alive on Android 15 16 KB emulator.'
