@@ -1,0 +1,11 @@
+# Cargo linker policy injected into the normalized GDScript Lab v1.0.0 source
+# before Android builds. It is intentionally Android-only so desktop targets are
+# unaffected. Both flags follow Android's documented guidance for 16 KB ELF
+# alignment and also make the requirement explicit even though NDK r28+ uses
+# 16 KB alignment by default.
+
+[target.'cfg(target_os = "android")']
+rustflags = [
+  "-C", "link-arg=-Wl,-z,max-page-size=16384",
+  "-C", "link-arg=-Wl,-z,common-page-size=16384",
+]
