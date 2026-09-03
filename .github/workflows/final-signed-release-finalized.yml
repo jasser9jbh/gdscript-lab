@@ -1,0 +1,391 @@
+name: GDScript Lab v1.0.0 trusted release from finalized source
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - release/v1.0.0-production-finalization
+    paths:
+      - '.github/workflows/final-signed-release-finalized.yml'
+      - '.github/scripts/verify-finalized-source.py'
+
+permissions:
+  contents: write
+  actions: read
+
+env:
+  SOURCE_RUN_ID: '33795848691'
+  SOURCE_ARTIFACT_NAME: GDScript-Lab-v1.0.0-PRODUCTION-FINALIZED-SOURCE
+  SOURCE_ZIP: GDScript_Lab_v1.0.0_PRODUCTION_FINALIZED_SOURCE.zip
+  SOURCE_ZIP_SHA256: c418540f7ef9a00783b44751d3316e37a57e1c486fb071c0136d0fca5d7b1527
+  PROJECT_DIR: GDScript_Lab_Tauri_v1.0.0
+  NODE_VERSION: '22.16.0'
+  RUST_VERSION: '1.98.0'
+  NDK_VERSION: '29.0.14206865'
+  EXPECTED_ANDROID_CERT_SHA256: 22b7c431868e0e67ef045ca6b212bb35f2ccc71faabea3f9025ec6867085cf4a
+
+jobs:
+  source_gate:
+    name: Exact finalized-source release gate
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.13' }
+      - name: Download exact production-finalized source
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.SOURCE_ARTIFACT_NAME }}
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ env.SOURCE_RUN_ID }}
+          path: source-artifact
+      - name: Verify finalized source, frozen learner payload and mobile release policy
+        run: python .github/scripts/verify-finalized-source.py source-artifact verified-source
+      - name: Require frozen dependency graphs covered by the public-release security preflight
+        shell: bash
+        run: |
+          set -euo pipefail
+          P=verified-source/$PROJECT_DIR
+          test "$(sha256sum "$P/package-lock.json" | awk '{print $1}')" = d1b81347875861c66d5c373e59c5f36020eade05bf3ef82868e674af376faede
+          test "$(sha256sum "$P/src-tauri/Cargo.lock" | awk '{print $1}')" = 55d3d31b7cefd5591d6d710ff135c6f1cf2cb8b3aa3620c86e710e214915ed4f
+          printf '%s\n' 'PASS: finalized source retains the audited locked dependency graphs.'
+
+  linux:
+    name: Linux x64 AppImage + DEB
+    needs: source_gate
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.13' }
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.SOURCE_ARTIFACT_NAME }}
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ env.SOURCE_RUN_ID }}
+          path: source-artifact
+      - run: python .github/scripts/verify-finalized-source.py source-artifact workspace
+      - name: Install Linux prerequisites
+        run: sudo apt-get -o Acquire::Retries=3 update && sudo DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf xdg-utils xvfb
+      - uses: actions/setup-node@v4
+        with: { node-version: '${{ env.NODE_VERSION }}', cache: npm, cache-dependency-path: 'workspace/GDScript_Lab_Tauri_v1.0.0/package-lock.json' }
+      - uses: dtolnay/rust-toolchain@master
+        with: { toolchain: '${{ env.RUST_VERSION }}' }
+      - uses: swatinem/rust-cache@v2
+        with: { workspaces: './workspace/GDScript_Lab_Tauri_v1.0.0/src-tauri -> target' }
+      - name: Build and smoke-test Linux
+        working-directory: workspace/GDScript_Lab_Tauri_v1.0.0
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci; npm run icons
+          cargo metadata --locked --format-version 1 --manifest-path src-tauri/Cargo.toml >/dev/null
+          npm run tauri -- build --bundles appimage,deb
+          APP="$(find src-tauri/target -type f -name '*.AppImage' -print -quit)"; DEB="$(find src-tauri/target -type f -name '*.deb' -print -quit)"
+          test -n "$APP" && test -n "$DEB"; chmod +x "$APP"
+          xvfb-run -a env APPIMAGE_EXTRACT_AND_RUN=1 "$APP" > "$RUNNER_TEMP/linux.log" 2>&1 & PID=$!; sleep 10; kill -0 "$PID"; kill "$PID" || true; wait "$PID" || true
+          OUT="$RUNNER_TEMP/linux-final"; mkdir -p "$OUT"; cp "$APP" "$OUT/GDScript-Lab-v1.0.0.AppImage"; cp "$DEB" "$OUT/GDScript-Lab-v1.0.0.deb"
+          echo 'PASS: final-source Linux AppImage runtime smoke passed.' > "$OUT/LINUX_RUNTIME_VERIFICATION.txt"; sha256sum "$OUT"/* > "$OUT/SHA256SUMS.txt"
+      - uses: actions/upload-artifact@v4
+        with: { name: GDScript-Lab-v1.0.0-TRUSTED-Linux, path: '${{ runner.temp }}/linux-final/**', if-no-files-found: error, retention-days: 90 }
+
+  windows:
+    name: Windows x64 Authenticode NSIS + MSI
+    needs: source_gate
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    runs-on: windows-latest
+    steps:
+      - name: Require trusted publisher certificate
+        shell: pwsh
+        env:
+          CERT: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
+          PASS: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: if ([string]::IsNullOrWhiteSpace($env:CERT) -or [string]::IsNullOrWhiteSpace($env:PASS)) { throw 'Trusted Windows publisher certificate secrets are required.' }
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.13' }
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.SOURCE_ARTIFACT_NAME }}
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ env.SOURCE_RUN_ID }}
+          path: source-artifact
+      - run: python .github/scripts/verify-finalized-source.py source-artifact workspace
+      - uses: actions/setup-node@v4
+        with: { node-version: '${{ env.NODE_VERSION }}', cache: npm, cache-dependency-path: 'workspace/GDScript_Lab_Tauri_v1.0.0/package-lock.json' }
+      - uses: dtolnay/rust-toolchain@master
+        with: { toolchain: '${{ env.RUST_VERSION }}' }
+      - uses: swatinem/rust-cache@v2
+        with: { workspaces: './workspace/GDScript_Lab_Tauri_v1.0.0/src-tauri -> target' }
+      - name: Import certificate and prepare Tauri signing config
+        shell: pwsh
+        env:
+          CERT: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
+          PASS: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          TIMESTAMP: ${{ vars.WINDOWS_TIMESTAMP_URL }}
+        run: |
+          $pfx="$env:RUNNER_TEMP\publisher.pfx"; [IO.File]::WriteAllBytes($pfx,[Convert]::FromBase64String($env:CERT))
+          $secure=ConvertTo-SecureString $env:PASS -AsPlainText -Force; $cert=Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $secure
+          if (-not $cert.HasPrivateKey) { throw 'Windows certificate has no private key' }
+          $ts=$env:TIMESTAMP; if ([string]::IsNullOrWhiteSpace($ts)) { $ts='http://timestamp.digicert.com' }
+          $cfg=@{ bundle=@{ windows=@{ certificateThumbprint=$cert.Thumbprint; digestAlgorithm='sha256'; timestampUrl=$ts } } } | ConvertTo-Json -Depth 6
+          $cfgPath="$env:RUNNER_TEMP\windows-signing.json"; Set-Content $cfgPath $cfg -Encoding UTF8; "WINDOWS_SIGNING_CONFIG=$cfgPath" | Out-File $env:GITHUB_ENV -Append -Encoding utf8; Remove-Item $pfx -Force
+      - name: Build, verify and smoke-test signed Windows
+        working-directory: workspace/GDScript_Lab_Tauri_v1.0.0
+        shell: pwsh
+        run: |
+          npm ci; npm run icons; cargo metadata --locked --format-version 1 --manifest-path src-tauri/Cargo.toml | Out-Null
+          npm run tauri -- build --bundles nsis,msi --config $env:WINDOWS_SIGNING_CONFIG
+          $setup=Get-ChildItem src-tauri/target -Recurse -File | ? FullName -match '\\bundle\\nsis\\.*\.exe$' | Select -First 1; $msi=Get-ChildItem src-tauri/target -Recurse -File | ? FullName -match '\\bundle\\msi\\.*\.msi$' | Select -First 1; $app=Get-ChildItem src-tauri/target -Recurse -File -Filter gdscript-lab.exe | ? FullName -match '\\release\\gdscript-lab\.exe$' | Select -First 1
+          if (-not $setup -or -not $msi -or -not $app) { throw 'Windows release artifacts missing' }
+          foreach($f in @($setup,$msi,$app)){ if((Get-AuthenticodeSignature $f.FullName).Status -ne 'Valid'){ throw "Invalid Authenticode signature: $($f.Name)" } }
+          $p=Start-Process $app.FullName -PassThru; Start-Sleep 10; if($p.HasExited){ throw 'Signed application exited during smoke' }; Stop-Process $p.Id -Force
+          $out="$env:RUNNER_TEMP\windows-final"; New-Item -ItemType Directory -Force $out | Out-Null; Copy-Item $setup.FullName "$out\GDScript-Lab-v1.0.0-Setup.exe"; Copy-Item $msi.FullName "$out\GDScript-Lab-v1.0.0.msi"; Get-AuthenticodeSignature $app.FullName,"$out\GDScript-Lab-v1.0.0-Setup.exe","$out\GDScript-Lab-v1.0.0.msi" | Format-List * | Out-File "$out\AUTHENTICODE_VERIFICATION.txt"; 'PASS' | Set-Content "$out\WINDOWS_RUNTIME_VERIFICATION.txt"
+      - uses: actions/upload-artifact@v4
+        with: { name: GDScript-Lab-v1.0.0-TRUSTED-Windows, path: '${{ runner.temp }}/windows-final/**', if-no-files-found: error, retention-days: 90 }
+
+  macos:
+    name: macOS signed + notarized (${{ matrix.arch }})
+    needs: source_gate
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: Apple-Silicon, target: aarch64-apple-darwin, os: macos-15 }
+          - { arch: Intel, target: x86_64-apple-darwin, os: macos-15-intel }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Require Developer ID + notarization credentials
+        shell: bash
+        env:
+          CERT: ${{ secrets.MACOS_CERTIFICATE_BASE64 }}
+          CERT_PASS: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASS: ${{ secrets.MACOS_KEYCHAIN_PASSWORD }}
+          ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          KEY_ID: ${{ secrets.APPLE_API_KEY }}
+          API_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY_BASE64 }}
+        run: for v in CERT CERT_PASS KEYCHAIN_PASS ISSUER KEY_ID API_KEY; do test -n "${!v:-}" || { echo "Missing $v"; exit 1; }; done
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.13' }
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.SOURCE_ARTIFACT_NAME }}
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ env.SOURCE_RUN_ID }}
+          path: source-artifact
+      - run: python .github/scripts/verify-finalized-source.py source-artifact workspace
+      - uses: actions/setup-node@v4
+        with: { node-version: '${{ env.NODE_VERSION }}', cache: npm, cache-dependency-path: 'workspace/GDScript_Lab_Tauri_v1.0.0/package-lock.json' }
+      - uses: dtolnay/rust-toolchain@master
+        with: { toolchain: '${{ env.RUST_VERSION }}', targets: '${{ matrix.target }}' }
+      - uses: swatinem/rust-cache@v2
+        with: { workspaces: './workspace/GDScript_Lab_Tauri_v1.0.0/src-tauri -> target' }
+      - name: Import Developer ID and API key
+        shell: bash
+        env:
+          CERT: ${{ secrets.MACOS_CERTIFICATE_BASE64 }}
+          CERT_PASS: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASS: ${{ secrets.MACOS_KEYCHAIN_PASSWORD }}
+          KEY_ID: ${{ secrets.APPLE_API_KEY }}
+          API_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY_BASE64 }}
+        run: |
+          python - <<'PY'
+          import base64,os,pathlib
+          t=pathlib.Path(os.environ['RUNNER_TEMP']); t.joinpath('cert.p12').write_bytes(base64.b64decode(os.environ['CERT'])); t.joinpath(f"AuthKey_{os.environ['KEY_ID']}.p8").write_bytes(base64.b64decode(os.environ['API_KEY']))
+          PY
+          K="$RUNNER_TEMP/gdlab.keychain-db"; security create-keychain -p "$KEYCHAIN_PASS" "$K"; security default-keychain -s "$K"; security unlock-keychain -p "$KEYCHAIN_PASS" "$K"; security import "$RUNNER_TEMP/cert.p12" -k "$K" -P "$CERT_PASS" -T /usr/bin/codesign; security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASS" "$K"
+          ID="$(security find-identity -v -p codesigning "$K" | sed -n 's/.*"\(Developer ID Application:.*\)".*/\1/p' | head -1)"; test -n "$ID"
+          echo "APPLE_SIGNING_IDENTITY=$ID" >> "$GITHUB_ENV"; echo "APPLE_API_KEY_PATH=$RUNNER_TEMP/AuthKey_${KEY_ID}.p8" >> "$GITHUB_ENV"; rm -f "$RUNNER_TEMP/cert.p12"
+      - name: Build signed/notarized DMG and verify
+        working-directory: workspace/GDScript_Lab_Tauri_v1.0.0
+        shell: bash
+        env:
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+        run: |
+          set -euo pipefail
+          npm ci; npm run icons; cargo metadata --locked --format-version 1 --manifest-path src-tauri/Cargo.toml >/dev/null
+          npm run tauri -- build --target '${{ matrix.target }}' --bundles app,dmg
+          APP="$(find src-tauri/target -type d -path '*/bundle/macos/*.app' -print -quit)"; DMG="$(find src-tauri/target -type f -path '*/bundle/dmg/*.dmg' -print -quit)"; test -n "$APP" && test -n "$DMG"
+          codesign --verify --deep --strict --verbose=2 "$APP"; spctl --assess --type execute --verbose=4 "$APP"; xcrun stapler validate "$APP"
+          EXE="$(find "$APP/Contents/MacOS" -maxdepth 1 -type f -perm +111 -print -quit)"; "$EXE" > "$RUNNER_TEMP/macos.log" 2>&1 & PID=$!; sleep 10; kill -0 "$PID"; kill "$PID" || true; wait "$PID" || true
+          OUT="$RUNNER_TEMP/macos-final"; mkdir -p "$OUT"; cp "$DMG" "$OUT/GDScript-Lab-v1.0.0-macOS-${{ matrix.arch }}.dmg"; codesign -dv --verbose=4 "$APP" 2> "$OUT/CODESIGN_VERIFICATION.txt"; spctl --assess --type execute --verbose=4 "$APP" 2> "$OUT/GATEKEEPER_VERIFICATION.txt"; xcrun stapler validate "$APP" > "$OUT/NOTARIZATION_VERIFICATION.txt" 2>&1
+      - uses: actions/upload-artifact@v4
+        with: { name: 'GDScript-Lab-v1.0.0-TRUSTED-macOS-${{ matrix.arch }}', path: '${{ runner.temp }}/macos-final/**', if-no-files-found: error, retention-days: 90 }
+
+  android:
+    name: Android permanent-signed APK + AAB, 16-KB runtime
+    needs: source_gate
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Require permanent Android identity
+        shell: bash
+        env:
+          KS: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          STORE: ${{ secrets.ANDROID_STORE_PASSWORD }}
+          KEY: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: for v in KS ALIAS STORE KEY; do test -n "${!v:-}" || { echo "Missing Android release secret"; exit 1; }; done
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.13' }
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.SOURCE_ARTIFACT_NAME }}
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ env.SOURCE_RUN_ID }}
+          path: source-artifact
+      - run: python .github/scripts/verify-finalized-source.py source-artifact workspace
+      - uses: actions/setup-node@v4
+        with: { node-version: '${{ env.NODE_VERSION }}', cache: npm, cache-dependency-path: 'workspace/GDScript_Lab_Tauri_v1.0.0/package-lock.json' }
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: '17' }
+      - uses: android-actions/setup-android@v4
+      - name: Install API 36, Build Tools 36 and NDK r29
+        run: sdkmanager 'platform-tools' 'platforms;android-36' 'build-tools;36.0.0' "ndk;${NDK_VERSION}" && echo "NDK_HOME=$ANDROID_HOME/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@master
+        with: { toolchain: '${{ env.RUST_VERSION }}', targets: 'aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android' }
+      - uses: swatinem/rust-cache@v2
+        with: { workspaces: './workspace/GDScript_Lab_Tauri_v1.0.0/src-tauri -> target' }
+      - name: Build, 16-KB verify, permanently sign and verify
+        working-directory: workspace/GDScript_Lab_Tauri_v1.0.0
+        shell: bash
+        env:
+          KS_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          STORE: ${{ secrets.ANDROID_STORE_PASSWORD }}
+          KEY: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          npm ci; npm run icons; npm run android:init; npm run android:apk; npm run android:aab
+          APK="$(find src-tauri/gen/android/app/build/outputs -type f -name '*release-unsigned.apk' -print -quit)"; AAB="$(find src-tauri/gen/android/app/build/outputs -type f -name '*.aab' -print -quit)"; test -n "$APK" && test -n "$AAB"
+          BT="$ANDROID_HOME/build-tools/36.0.0"; "$BT/zipalign" -c -P 16 -v 4 "$APK" > "$RUNNER_TEMP/ZIPALIGN_UNSIGNED.txt"
+          rm -rf "$RUNNER_TEMP/elf"; mkdir "$RUNNER_TEMP/elf"; unzip -q "$APK" 'lib/*/*.so' -d "$RUNNER_TEMP/elf"; READELF="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
+          python - "$READELF" "$RUNNER_TEMP/elf" <<'PY'
+          import pathlib,re,subprocess,sys
+          n=0
+          for so in pathlib.Path(sys.argv[2]).rglob('*.so'):
+              out=subprocess.check_output([sys.argv[1],'-lW',str(so)],text=True); aligns=[int(x.split()[-1],16) for x in out.splitlines() if re.match(r'^\s*LOAD\s',x)]
+              if not aligns or min(aligns)<0x4000: raise SystemExit(f'16-KB ELF failure: {so} {aligns}')
+              n+=1
+          if not n: raise SystemExit('no native libraries')
+          print(f'PASS: {n} native libraries >= 16-KB LOAD alignment')
+          PY
+          OUT="$RUNNER_TEMP/android-final"; mkdir "$OUT"; KS="$RUNNER_TEMP/release.jks"; printf '%s' "$KS_B64" | base64 --decode > "$KS"; chmod 600 "$KS"
+          "$BT/zipalign" -f -P 16 4 "$APK" "$RUNNER_TEMP/aligned.apk"; "$BT/apksigner" sign --ks "$KS" --ks-key-alias "$ALIAS" --ks-pass "pass:$STORE" --key-pass "pass:$KEY" --out "$OUT/GDScript-Lab-v1.0.0.apk" "$RUNNER_TEMP/aligned.apk"; cp "$AAB" "$OUT/GDScript-Lab-v1.0.0.aab"; jarsigner -keystore "$KS" -storepass "$STORE" -keypass "$KEY" -sigalg SHA256withRSA -digestalg SHA-256 "$OUT/GDScript-Lab-v1.0.0.aab" "$ALIAS" >/dev/null
+          "$BT/apksigner" verify --verbose --print-certs "$OUT/GDScript-Lab-v1.0.0.apk" | tee "$OUT/APK_SIGNATURE_VERIFICATION.txt"; "$BT/zipalign" -c -P 16 -v 4 "$OUT/GDScript-Lab-v1.0.0.apk" > "$OUT/APK_ZIPALIGN_16K.txt"; jarsigner -verify -verbose -certs "$OUT/GDScript-Lab-v1.0.0.aab" > "$OUT/AAB_SIGNATURE_VERIFICATION.txt" 2>&1; grep -q 'jar verified' "$OUT/AAB_SIGNATURE_VERIFICATION.txt"
+          CERT="$("$BT/apksigner" verify --print-certs "$OUT/GDScript-Lab-v1.0.0.apk" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' | head -1)"; test "$CERT" = "$EXPECTED_ANDROID_CERT_SHA256"; echo "Certificate SHA-256: $CERT" > "$OUT/ANDROID_RELEASE_IDENTITY.txt"; rm -f "$KS" "$RUNNER_TEMP/aligned.apk"
+      - name: Enable KVM
+        run: echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules && sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm || true
+      - name: Runtime-test signed APK on 16-KB emulator
+        uses: ReactiveCircus/android-emulator-runner@v2.38.0
+        with:
+          api-level: 35
+          arch: x86_64
+          target: google_apis_ps16k
+          disable-animations: true
+          script: adb shell getconf PAGE_SIZE | tr -d '\r' | grep -x '16384' && adb install -r "$RUNNER_TEMP/android-final/GDScript-Lab-v1.0.0.apk" && adb shell monkey -p com.jbhprods.gdscriptlab -c android.intent.category.LAUNCHER 1 && sleep 10 && adb shell pidof com.jbhprods.gdscriptlab | tr -d '\r' | grep -Eq '^[0-9]+'
+      - uses: actions/upload-artifact@v4
+        with: { name: GDScript-Lab-v1.0.0-TRUSTED-Android, path: '${{ runner.temp }}/android-final/**', if-no-files-found: error, retention-days: 90 }
+
+  ios:
+    name: iOS App Store Connect IPA
+    needs: source_gate
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    runs-on: macos-latest
+    steps:
+      - name: Require Apple Distribution material
+        shell: bash
+        env:
+          CERT: ${{ secrets.IOS_CERTIFICATE }}
+          PASS: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
+          PROFILE: ${{ secrets.IOS_MOBILE_PROVISION }}
+          TEAM: ${{ secrets.APPLE_DEVELOPMENT_TEAM }}
+        run: for v in CERT PASS PROFILE TEAM; do test -n "${!v:-}" || { echo 'Missing iOS distribution secret'; exit 1; }; done
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.13' }
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.SOURCE_ARTIFACT_NAME }}
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ env.SOURCE_RUN_ID }}
+          path: source-artifact
+      - run: python .github/scripts/verify-finalized-source.py source-artifact workspace
+      - uses: actions/setup-node@v4
+        with: { node-version: '${{ env.NODE_VERSION }}', cache: npm, cache-dependency-path: 'workspace/GDScript_Lab_Tauri_v1.0.0/package-lock.json' }
+      - uses: dtolnay/rust-toolchain@master
+        with: { toolchain: '${{ env.RUST_VERSION }}', targets: 'aarch64-apple-ios,x86_64-apple-ios,aarch64-apple-ios-sim' }
+      - name: Import Apple Distribution identity and profile
+        shell: bash
+        env:
+          CERT: ${{ secrets.IOS_CERTIFICATE }}
+          PASS: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
+          PROFILE: ${{ secrets.IOS_MOBILE_PROVISION }}
+          TEAM: ${{ secrets.APPLE_DEVELOPMENT_TEAM }}
+        run: |
+          python - <<'PY'
+          import base64,os,pathlib
+          t=pathlib.Path(os.environ['RUNNER_TEMP']); t.joinpath('ios.p12').write_bytes(base64.b64decode(os.environ['CERT'])); t.joinpath('gdlab.mobileprovision').write_bytes(base64.b64decode(os.environ['PROFILE']))
+          PY
+          KP="$(python -c 'import secrets;print(secrets.token_urlsafe(32))')"; K="$RUNNER_TEMP/ios.keychain-db"; security create-keychain -p "$KP" "$K"; security default-keychain -s "$K"; security unlock-keychain -p "$KP" "$K"; security import "$RUNNER_TEMP/ios.p12" -k "$K" -P "$PASS" -T /usr/bin/codesign; security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KP" "$K"
+          security cms -D -i "$RUNNER_TEMP/gdlab.mobileprovision" > "$RUNNER_TEMP/profile.plist"; UUID="$(/usr/libexec/PlistBuddy -c 'Print :UUID' "$RUNNER_TEMP/profile.plist")"; PTEAM="$(/usr/libexec/PlistBuddy -c 'Print :TeamIdentifier:0' "$RUNNER_TEMP/profile.plist")"; APPID="$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:application-identifier' "$RUNNER_TEMP/profile.plist")"; test "$PTEAM" = "$TEAM"; case "$APPID" in "$TEAM.com.jbhprods.gdscriptlab"|*.com.jbhprods.gdscriptlab) ;; *) exit 1;; esac; mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"; cp "$RUNNER_TEMP/gdlab.mobileprovision" "$HOME/Library/MobileDevice/Provisioning Profiles/$UUID.mobileprovision"; rm -f "$RUNNER_TEMP/ios.p12"
+      - name: Build and verify App Store IPA
+        working-directory: workspace/GDScript_Lab_Tauri_v1.0.0
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci; npm run icons; npm run tauri -- ios init --ci; npm run tauri -- ios build --ci --export-method app-store-connect
+          IPA="$(find . -type f -name '*.ipa' -print -quit)"; test -n "$IPA"; rm -rf "$RUNNER_TEMP/ipa"; mkdir "$RUNNER_TEMP/ipa"; unzip -q "$IPA" -d "$RUNNER_TEMP/ipa"; APP="$(find "$RUNNER_TEMP/ipa/Payload" -maxdepth 1 -type d -name '*.app' -print -quit)"; codesign --verify --deep --strict --verbose=2 "$APP"; test -f "$APP/embedded.mobileprovision"
+          OUT="$RUNNER_TEMP/ios-final"; mkdir "$OUT"; cp "$IPA" "$OUT/GDScript-Lab-v1.0.0-iOS.ipa"; codesign -dv --verbose=4 "$APP" 2> "$OUT/IOS_CODESIGN_VERIFICATION.txt"
+      - uses: actions/upload-artifact@v4
+        with: { name: GDScript-Lab-v1.0.0-TRUSTED-iOS, path: '${{ runner.temp }}/ios-final/**', if-no-files-found: error, retention-days: 90 }
+
+  package:
+    name: Assemble trusted all-platform release
+    needs: [linux, windows, macos, android, ios]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { pattern: 'GDScript-Lab-v1.0.0-TRUSTED-*', path: artifacts }
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.SOURCE_ARTIFACT_NAME }}
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ env.SOURCE_RUN_ID }}
+          path: source-artifact
+      - name: Assemble, hash and create draft release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          R=GDScript-Lab-v1.0.0; mkdir -p "$R"/{Windows,Linux,Android,iOS,Portable,Source,Documentation} "$R/macOS"/{Apple-Silicon,Intel}
+          cp "$(find artifacts -name 'GDScript-Lab-v1.0.0-Setup.exe' -print -quit)" "$R/Windows/"; cp "$(find artifacts -name 'GDScript-Lab-v1.0.0.msi' -print -quit)" "$R/Windows/"; cp "$(find artifacts -name 'GDScript-Lab-v1.0.0.AppImage' -print -quit)" "$R/Linux/"; cp "$(find artifacts -name 'GDScript-Lab-v1.0.0.deb' -print -quit)" "$R/Linux/"; cp "$(find artifacts -name 'GDScript-Lab-v1.0.0.apk' -print -quit)" "$R/Android/"; cp "$(find artifacts -name 'GDScript-Lab-v1.0.0.aab' -print -quit)" "$R/Android/"; cp "$(find artifacts -name 'GDScript-Lab-v1.0.0-iOS.ipa' -print -quit)" "$R/iOS/"; cp "$(find artifacts/GDScript-Lab-v1.0.0-TRUSTED-macOS-Apple-Silicon -name '*.dmg' -print -quit)" "$R/macOS/Apple-Silicon/"; cp "$(find artifacts/GDScript-Lab-v1.0.0-TRUSTED-macOS-Intel -name '*.dmg' -print -quit)" "$R/macOS/Intel/"
+          SRC="$(find source-artifact -name "$SOURCE_ZIP" -print -quit)"; test "$(sha256sum "$SRC"|awk '{print $1}')" = "$SOURCE_ZIP_SHA256"; cp "$SRC" "$R/Source/"
+          mkdir srcx; unzip -q "$SRC" -d srcx; cp "srcx/$PROJECT_DIR/portable/GDScript_Lab_Godot47_v1.0.0.html" "$R/Portable/"; cp "srcx/$PROJECT_DIR/LICENSE.txt" "$R/"; cp "srcx/$PROJECT_DIR/THIRD_PARTY_NOTICES.md" "$R/"
+          find artifacts -type f -name '*VERIFICATION.txt' -exec cp {} "$R/Documentation/" \;
+          printf '%s\n' 'GDScript Lab v1.0.0 — trusted cross-platform release.' 'All platform credential-dependent jobs must pass before this package exists.' 'Private signing material included: NO.' > "$R/README.txt"
+          find "$R" -type f ! -name SHA256SUMS.txt -print0 | sort -z | xargs -0 sha256sum > "$R/SHA256SUMS.txt"
+          python -m zipfile -c GDScript-Lab-v1.0.0-ALL-PLATFORMS-TRUSTED-FINAL.zip "$R"; sha256sum GDScript-Lab-v1.0.0-ALL-PLATFORMS-TRUSTED-FINAL.zip > GDScript-Lab-v1.0.0-ALL-PLATFORMS-TRUSTED-FINAL.zip.sha256
+          if gh release view v1.0.0 --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then gh release upload v1.0.0 GDScript-Lab-v1.0.0-ALL-PLATFORMS-TRUSTED-FINAL.zip GDScript-Lab-v1.0.0-ALL-PLATFORMS-TRUSTED-FINAL.zip.sha256 --clobber --repo "$GITHUB_REPOSITORY"; else gh release create v1.0.0 GDScript-Lab-v1.0.0-ALL-PLATFORMS-TRUSTED-FINAL.zip GDScript-Lab-v1.0.0-ALL-PLATFORMS-TRUSTED-FINAL.zip.sha256 --repo "$GITHUB_REPOSITORY" --target main --title 'GDScript Lab v1.0.0' --notes 'Trusted final release. Publish only after reviewing verification evidence.' --draft; fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GDScript-Lab-v1.0.0-ALL-PLATFORMS-TRUSTED-FINAL
+          path: |
+            GDScript-Lab-v1.0.0-ALL-PLATFORMS-TRUSTED-FINAL.zip
+            GDScript-Lab-v1.0.0-ALL-PLATFORMS-TRUSTED-FINAL.zip.sha256
+          if-no-files-found: error
+          retention-days: 90
