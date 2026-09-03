@@ -138,7 +138,7 @@ jobs:
           npm ci
           npm run icons
           cargo metadata --locked --format-version 1 --manifest-path src-tauri/Cargo.toml | Out-Null
-          npm run tauri -- build --bundles nsis,msi
+          npm run build:windows
           $setup=Get-ChildItem src-tauri/target -Recurse -File | Where-Object { $_.FullName -match '\\bundle\\nsis\\.*\.exe$' } | Select-Object -First 1
           $msi=Get-ChildItem src-tauri/target -Recurse -File | Where-Object { $_.FullName -match '\\bundle\\msi\\.*\.msi$' } | Select-Object -First 1
           $app=Get-ChildItem src-tauri/target -Recurse -File -Filter gdscript-lab.exe | Where-Object { $_.FullName -match '\\release\\gdscript-lab\.exe$' } | Select-Object -First 1
