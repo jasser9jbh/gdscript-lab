@@ -1,4 +1,4 @@
-name: GDScript Lab v1.0.0 finalized iOS source proof v2
+name: GDScript Lab v1.0.0 authoritative iOS source proof
 
 on:
   push:
@@ -13,14 +13,14 @@ permissions:
   actions: read
 
 env:
-  SOURCE_RUN_ID: '33692246998'
-  SOURCE_ARTIFACT_NAME: GDScript-Lab-v1.0.0-PRODUCTION-source
-  SOURCE_ZIP: GDScript_Lab_v1.0.0_PRODUCTION_SOURCE.zip
-  SOURCE_ZIP_SHA256: 53dd49b8b9ab98de0dd240c6ef31862cd2d04298ed33b7a57562f81269a8f3aa
+  SOURCE_RUN_ID: '33799971760'
+  SOURCE_ARTIFACT_NAME: GDScript-Lab-v1.0.0-PRODUCTION-FINALIZED-SOURCE-V2
+  SOURCE_ZIP: GDScript_Lab_v1.0.0_PRODUCTION_FINALIZED_SOURCE.zip
+  SOURCE_ZIP_SHA256: 615412cd34c93c18d622e18a8d474b8c53ad565afac1a57b18f5db22c893d9b4
   PROJECT_DIR: GDScript_Lab_Tauri_v1.0.0
 
 jobs:
-  ios-finalized-compile:
+  ios-authoritative-compile:
     runs-on: macos-latest
     timeout-minutes: 90
     steps:
@@ -34,17 +34,11 @@ jobs:
           repository: ${{ github.repository }}
           run-id: ${{ env.SOURCE_RUN_ID }}
           path: source-artifact
-      - name: Verify and finalize exact source
+      - name: Verify and extract authoritative source
         shell: bash
         run: |
           set -euo pipefail
-          FOUND="$(find source-artifact -type f -name "$SOURCE_ZIP" -print -quit)"
-          test -n "$FOUND"
-          test "$(shasum -a 256 "$FOUND" | awk '{print $1}')" = "$SOURCE_ZIP_SHA256"
-          python -m zipfile -e "$FOUND" .
-          (cd "$PROJECT_DIR" && python scripts/audit.py)
-          python .github/scripts/finalize-v1-source.py "$PROJECT_DIR"
-          (cd "$PROJECT_DIR" && python scripts/audit.py | tee "$RUNNER_TEMP/FINAL_SOURCE_AUDIT.txt")
+          python .github/scripts/verify-finalized-source.py source-artifact . | tee "$RUNNER_TEMP/FINAL_SOURCE_AUDIT.txt"
       - name: Require Xcode 26+ and iOS 26 SDK+
         shell: bash
         run: |
@@ -68,7 +62,7 @@ jobs:
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: './GDScript_Lab_Tauri_v1.0.0/src-tauri -> target'
-      - name: Compile corrected iOS 15+ source without distribution signing
+      - name: Compile authoritative iOS 15+ source without distribution signing
         working-directory: ${{ env.PROJECT_DIR }}
         shell: bash
         run: |
@@ -79,10 +73,10 @@ jobs:
           python scripts/audit.py
           npm run ios:init
           npm run ios:build
-          printf '%s\n' 'PASS: corrected v1.0.0 source compiled at iOS minimum 15.0 on Xcode 26+ / iOS 26 SDK+ without distribution signing.' > "$RUNNER_TEMP/IOS_FINALIZED_COMPILE_VALIDATION.txt"
+          printf '%s\n' 'PASS: authoritative v1.0.0 source compiled at iOS minimum 15.0 on Xcode 26+ / iOS 26 SDK+ without distribution signing.' > "$RUNNER_TEMP/IOS_FINALIZED_COMPILE_VALIDATION.txt"
       - uses: actions/upload-artifact@v4
         with:
-          name: GDScript-Lab-v1.0.0-FINALIZED-iOS-compile-proof-v2
+          name: GDScript-Lab-v1.0.0-AUTHORITATIVE-iOS-compile-proof
           path: |
             ${{ runner.temp }}/IOS_FINALIZED_COMPILE_VALIDATION.txt
             ${{ runner.temp }}/XCODE_VERSION.txt
