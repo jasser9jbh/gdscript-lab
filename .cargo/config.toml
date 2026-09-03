@@ -1,0 +1,9 @@
+# Canonical Cargo policy for GDScript Lab release builds.
+# It is Android-only, so Windows, Linux, macOS and iOS Cargo targets are unaffected.
+# The explicit flags make 16 KB ELF page-size compatibility durable across Tauri/Gradle rebuilds.
+
+[target.'cfg(target_os = "android")']
+rustflags = [
+  "-C", "link-arg=-Wl,-z,max-page-size=16384",
+  "-C", "link-arg=-Wl,-z,common-page-size=16384",
+]
