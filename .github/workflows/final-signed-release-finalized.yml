@@ -140,12 +140,17 @@ jobs:
         shell: pwsh
         run: |
           npm ci; npm run icons; cargo metadata --locked --format-version 1 --manifest-path src-tauri/Cargo.toml | Out-Null
-          npm run tauri -- build --bundles nsis,msi --config $env:WINDOWS_SIGNING_CONFIG
-          $setup=Get-ChildItem src-tauri/target -Recurse -File | ? FullName -match '\\bundle\\nsis\\.*\.exe$' | Select -First 1; $msi=Get-ChildItem src-tauri/target -Recurse -File | ? FullName -match '\\bundle\\msi\\.*\.msi$' | Select -First 1; $app=Get-ChildItem src-tauri/target -Recurse -File -Filter gdscript-lab.exe | ? FullName -match '\\release\\gdscript-lab\.exe$' | Select -First 1
+          npm run build:windows -- --config $env:WINDOWS_SIGNING_CONFIG
+          $setup=Get-ChildItem src-tauri/target -Recurse -File | Where-Object { $_.FullName -match '\\bundle\\nsis\\.*\.exe$' } | Select-Object -First 1
+          $msi=Get-ChildItem src-tauri/target -Recurse -File | Where-Object { $_.FullName -match '\\bundle\\msi\\.*\.msi$' } | Select-Object -First 1
+          $app=Get-ChildItem src-tauri/target -Recurse -File -Filter gdscript-lab.exe | Where-Object { $_.FullName -match '\\release\\gdscript-lab\.exe$' } | Select-Object -First 1
           if (-not $setup -or -not $msi -or -not $app) { throw 'Windows release artifacts missing' }
           foreach($f in @($setup,$msi,$app)){ if((Get-AuthenticodeSignature $f.FullName).Status -ne 'Valid'){ throw "Invalid Authenticode signature: $($f.Name)" } }
           $p=Start-Process $app.FullName -PassThru; Start-Sleep 10; if($p.HasExited){ throw 'Signed application exited during smoke' }; Stop-Process $p.Id -Force
-          $out="$env:RUNNER_TEMP\windows-final"; New-Item -ItemType Directory -Force $out | Out-Null; Copy-Item $setup.FullName "$out\GDScript-Lab-v1.0.0-Setup.exe"; Copy-Item $msi.FullName "$out\GDScript-Lab-v1.0.0.msi"; Get-AuthenticodeSignature $app.FullName,"$out\GDScript-Lab-v1.0.0-Setup.exe","$out\GDScript-Lab-v1.0.0.msi" | Format-List * | Out-File "$out\AUTHENTICODE_VERIFICATION.txt"; 'PASS' | Set-Content "$out\WINDOWS_RUNTIME_VERIFICATION.txt"
+          $out="$env:RUNNER_TEMP\windows-final"; New-Item -ItemType Directory -Force $out | Out-Null
+          Copy-Item $setup.FullName "$out\GDScript-Lab-v1.0.0-Setup.exe"; Copy-Item $msi.FullName "$out\GDScript-Lab-v1.0.0.msi"
+          @($app.FullName,"$out\GDScript-Lab-v1.0.0-Setup.exe","$out\GDScript-Lab-v1.0.0.msi") | ForEach-Object { Get-AuthenticodeSignature $_ | Format-List * | Out-String } | Set-Content "$out\AUTHENTICODE_VERIFICATION.txt"
+          'PASS: signed Windows application remained alive for the runtime smoke interval.' | Set-Content "$out\WINDOWS_RUNTIME_VERIFICATION.txt"
       - uses: actions/upload-artifact@v4
         with: { name: GDScript-Lab-v1.0.0-TRUSTED-Windows, path: '${{ runner.temp }}/windows-final/**', if-no-files-found: error, retention-days: 90 }
 
